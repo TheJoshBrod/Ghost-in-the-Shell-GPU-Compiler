@@ -1,0 +1,47 @@
+#####################
+# Generic gitignore #
+#####################
+
+## Dont commit test output or temporary files
+tmp
+output
+
+
+# Python
+*.pyc
+__pycache__/
+*.egg-info*
+dist/
+env/
+venv/
+venv3/
+.venv/
+.pytest_cache
+
+# JavaScript
+bundle.js
+*node_modules*
+files_for_autograder_io/
+*/var/*
+
+# Virtual Machines
+.vagrant/
+
+# Text editors and IDEs
+*~
+*.lock
+*.swp
+.vscode
+.ropeproject/
+.vscode/
+.idea
+
+# macOS system files
+*.DS_Store
+
+# Zone Identifiers
+*Zone.Identifier
+
+# Google Drive and Dropbox
+Icon
+.dropbox*
