@@ -11,7 +11,7 @@ def handle_trace(prof):
     1. A high-level summary of PyTorch 'aten' operators.
     2. A detailed breakdown of the specific CUDA kernels that were launched.
     """
-
+    print("Hello world")
     aggregated_events = prof.key_averages(group_by_input_shape=True)
 
     # --- 1. High-Level Operator Summary ---
@@ -36,8 +36,20 @@ def handle_trace(prof):
             print(f"  Device Time (ms): {event.self_device_time_total / 1000.0:.3f}")
 
 
-def main():
-    print(f"[Main Thread] Using GPU: {torch.cuda.get_device_name(0)}")
+def extract_op_details(inputs: list[str], code: str):
+    """Extracts relevant information of sample PyTorch code including: 
+    - High level kernel PyTorch operators
+    - Names of PyTorch’s internal CUDA kernel/cuBLAS kernels/etc.
+    - Correct output given the input
+    
+    Args:
+        inputs (list[str]): List of inputs that the sample takes (values, size, etc.)
+        code (str): Literal PyTorch code to be executed
+    
+    Output:
+        str: Correct value of the PyTorch sample
+        str: Formatted string of high and low level representation of sample
+    """
 
     a = torch.randn(2048, 2048, device="cuda")
     b = torch.randn(2048, 2048, device="cuda")
@@ -73,7 +85,9 @@ def main():
         for i in range(total_steps):
             c = torch.matmul(a, b)
             d = torch.sin(c)
+            e = torch.cos(d)
+            f = torch.tan(e)
+            g = torch.matmul(f, f)
             p.step()
 
-if __name__ == "__main__":
-    main()
+extract_op_details([],"")
