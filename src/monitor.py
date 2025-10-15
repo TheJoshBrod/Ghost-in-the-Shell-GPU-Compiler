@@ -11,21 +11,27 @@ def handle_trace(prof):
     1. A high-level summary of PyTorch 'aten' operators.
     2. A detailed breakdown of the specific CUDA kernels that were launched.
     """
-    print("Hello world")
+
     aggregated_events = prof.key_averages(group_by_input_shape=True)
 
     # --- 1. High-Level Operator Summary ---
-    for event in aggregated_events:
-        # Filter for the main PyTorch operators
-        if event.key.startswith("aten::") and event.self_device_time_total > 0:
+    for event in prof.events():
+        if event.self_device_time_total == 0:
+            continue  # Skip events that did not run on device
+
+        # High-level ATen ops
+        if event.key.startswith("aten::"):
             print(f"[Op: {event.key}]")
-            
             if event.input_shapes:
                 print(f"  Inputs: {event.input_shapes}")
             else:
-                print(f"  Inputs: (Not available in this trace)")
+                print(f"  Inputs: (Not available)")
+            print(f"  Device Time (ms): {event.self_device_time_total / 1000.0:.3f}")
 
-            print(f"  Total Device Time (ms): {event.self_device_time_total / 1000.0:.3f}")
+        # Low-level CUDA kernels
+        elif "ProfilerStep" not in event.key:
+            print(f"[Kernel: {event.key}]")
+            print(f"  Device Time (ms): {event.self_device_time_total / 1000.0:.3f}")
 
     # --- 2. Detailed CUDA Kernel Breakdown ---
     for event in aggregated_events:
@@ -85,9 +91,7 @@ def extract_op_details(inputs: list[str], code: str):
         for i in range(total_steps):
             c = torch.matmul(a, b)
             d = torch.sin(c)
-            e = torch.cos(d)
-            f = torch.tan(e)
-            g = torch.matmul(f, f)
+            e = torch.sin(d)
             p.step()
 
 extract_op_details([],"")
