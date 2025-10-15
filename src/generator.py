@@ -1,10 +1,6 @@
 import regex as re
 import ollama as ol
-from fastapi import FastAPI
-
 from src.prompts import prompts
-
-app = FastAPI()
 
 def clean_output(raw: str) -> str:
     """Removes ```CUDA, ```, and other markdown fluff."""
@@ -18,21 +14,45 @@ def clean_output(raw: str) -> str:
 
     return raw
 
-@app.get("/ollama")
-def ollama_endpoint(msg: str, inputs: dict, model: str = "llama3.2:latest", outputIR: str = "CUDA"):
+def ollama_generator(msg: str, model: str = "llama3.2:latest", outputIR: str = "CUDA"):
+    """Initial generation of kernel/IR
 
-    # Generate initial kernel
-    sys_prompt = prompts.get_sys_prompt(outputIR)
+    Args:
+        msg (str): Context for LLM to generate Kernel/IR
+        model (str, optional): Which Ollama model to use for LLM. Defaults to "llama3.2:latest".
+        outputIR (str, optional): What is the desired output IR type. Defaults to "CUDA".
+
+    Returns:
+        str: Cleaned up version of the generated Kernel/IR 
+    """
+    
+    sys_prompt = prompts.get_generation_sys_prompt(outputIR)
     response = ol.chat(model=model, messages=[{"role": "system", "content": sys_prompt},{"role": "user", "content": msg}])
     raw_output = response['message']['content']
     cleaned_output = clean_output(raw_output)
 
-    # Handle Validation
-    # TODO
+    return cleaned_output
 
-    # Handle feedback loop
-    # TODO
+def ollama_fixer(kernel: str, error: str, msg: str, model: str = "llama3.2:latest", outputIR: str = "CUDA"):
+    """Fixes the previously generated kernel 
 
-    final_output = cleaned_output
+    Args:
+        kernel (str): Previous version of the malformed/incorrect Kernel generated
+        error (str): Custom error message to inform what the LLM did wrong 
+        msg (str): Context the ORIGINAL LLM had to generate Kernel/IR
+        model (str, optional): _description_. Defaults to "llama3.2:latest"
+        outputIR (str, optional): _description_. Defaults to "CUDA"
 
-    return {"kernel": final_output}
+    Returns:
+        str: New version of the kernel 
+    """
+
+    
+    sys_prompt = prompts.get_fixer_sys_prompt(outputIR)
+    prompt = prompts.generate_fixer_prompt(kernel, error, msg)
+
+    response = ol.chat(model=model, messages=[{"role": "system", "content": sys_prompt},{"role": "user", "content": prompt}])
+    raw_output = response['message']['content']
+    cleaned_output = clean_output(raw_output)
+
+    return cleaned_output

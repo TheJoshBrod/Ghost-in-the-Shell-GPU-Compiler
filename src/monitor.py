@@ -1,45 +1,43 @@
 """Monitors and Preprocesses PyTorch Aten and CUDA Kernel Abstraction Layer Calls for Generator"""
 import torch
-import time
+
+aten_output: str = ""
+kernel_output: str = ""
+
 
 if not torch.cuda.is_available():
     raise RuntimeError("This example requires a CUDA-enabled PyTorch installation.")
 
 def handle_trace(prof):
     """
-    This callback provides a two-level summary of the profiler trace:
-    1. A high-level summary of PyTorch 'aten' operators.
-    2. A detailed breakdown of the specific CUDA kernels that were launched.
+    Display profiled events grouped by high-level ATen operators, 
+    with the associated CUDA kernels underneath, preserving order.
     """
 
-    aggregated_events = prof.key_averages(group_by_input_shape=True)
-
-    # --- 1. High-Level Operator Summary ---
+    current_op = None
     for event in prof.events():
         if event.self_device_time_total == 0:
-            continue  # Skip events that did not run on device
+            continue  # skip events with no device time (profiler noise)
 
-        # High-level ATen ops
         if event.key.startswith("aten::"):
-            print(f"[Op: {event.key}]")
+            # Start a new high-level op
+            current_op = event.key
+            aten_output += f"[Op: {current_op}]\n"
             if event.input_shapes:
-                print(f"  Inputs: {event.input_shapes}")
+                aten_output += f"  Inputs: {event.input_shapes}\n"
             else:
-                print(f"  Inputs: (Not available)")
-            print(f"  Device Time (ms): {event.self_device_time_total / 1000.0:.3f}")
+                aten_output += f"  Inputs: (Not available)\n"
+            aten_output += f"  Device Time (ms): {event.self_device_time_total / 1000:.3f}\n"
 
-        # Low-level CUDA kernels
         elif "ProfilerStep" not in event.key:
-            print(f"[Kernel: {event.key}]")
-            print(f"  Device Time (ms): {event.self_device_time_total / 1000.0:.3f}")
-
-    # --- 2. Detailed CUDA Kernel Breakdown ---
-    for event in aggregated_events:
-        # Filter for the low-level kernel names. These do not start with 'aten::'
-        # and are not internal profiler steps.
-        if not event.key.startswith("aten::") and "ProfilerStep" not in event.key and event.self_device_time_total > 0:
-            print(f"[Kernel: {event.key}]")
-            print(f"  Device Time (ms): {event.self_device_time_total / 1000.0:.3f}")
+            # Low-level kernel; associate with current op if exists
+            if current_op:
+                kernel_output += f"    [Kernel: {event.key}]\n"
+                kernel_output += f"      Device Time (ms): {event.self_device_time_total / 1000:.3f}\n"
+            else:
+                # Kernel not associated with any high-level op
+                kernel_output += f"[Kernel: {event.key}]\n"
+                kernel_output += f"  Device Time (ms): {event.self_device_time_total / 1000:.3f}\n"
 
 
 def extract_op_details(inputs: list[str], code: str):
@@ -54,7 +52,8 @@ def extract_op_details(inputs: list[str], code: str):
     
     Output:
         str: Correct value of the PyTorch sample
-        str: Formatted string of high and low level representation of sample
+        str: Formatted string of high Aten representation of sample
+        str: Formatted string of low level kernel names of sample
     """
 
     a = torch.randn(2048, 2048, device="cuda")
@@ -62,12 +61,11 @@ def extract_op_details(inputs: list[str], code: str):
 
     print("\n[Main Thread] Starting profiled execution...")
 
-    # --- Define schedule parameters explicitly ---
+    # TODO: Define schedule parameters explicitly 
     wait_steps = 1
     warmup_steps = 1
     active_steps = 2
     repeat_cycles = 1
-    # -------------------------------------------
 
     # Create the schedule function
     schedule = torch.profiler.schedule(
@@ -94,4 +92,13 @@ def extract_op_details(inputs: list[str], code: str):
             e = torch.sin(d)
             p.step()
 
-extract_op_details([],"")
+        # TODO:
+        # I put this here to guarantee profiler is done before continuing
+        # It turns the execution to be synchronous, I don't think it breaks anything but should be looked into.  
+        p.stop()
+        handle_trace(p)
+
+        # TODO: Get output variable?
+        output = -1
+
+    return output, aten_output, kernel_output
