@@ -1,6 +1,8 @@
 import regex as re
 import ollama as ol
+import google.generativeai as genai
 from src.prompts import prompts
+
 
 def clean_output(raw: str) -> str:
     """Removes ```CUDA, ```, and other markdown fluff."""
@@ -25,12 +27,12 @@ def ollama_generator(msg: str, model: str = "llama3.2:latest", outputIR: str = "
     Returns:
         str: Cleaned up version of the generated Kernel/IR 
     """
-    
+    print("Generating code...")
     sys_prompt = prompts.get_generation_sys_prompt(outputIR)
     response = ol.chat(model=model, messages=[{"role": "system", "content": sys_prompt},{"role": "user", "content": msg}])
     raw_output = response['message']['content']
     cleaned_output = clean_output(raw_output)
-
+    print("Code generated...")
     return cleaned_output
 
 def ollama_fixer(kernel: str, error: str, msg: str, model: str = "llama3.2:latest", outputIR: str = "CUDA"):
@@ -55,4 +57,49 @@ def ollama_fixer(kernel: str, error: str, msg: str, model: str = "llama3.2:lates
     raw_output = response['message']['content']
     cleaned_output = clean_output(raw_output)
 
+    return cleaned_output
+
+def gemini_generator(msg: str, model: str = "gemini-2.5-flash", outputIR: str = "CUDA"):
+    """Initial generation of kernel/IR using Gemini.
+    ...
+    """
+    print("Generating code...")
+    sys_prompt = prompts.get_generation_sys_prompt(outputIR)
+    
+    # Create the model WITH the system prompt
+    chat = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=sys_prompt  # <-- Pass system prompt here
+    )
+    
+    # Send ONLY the user message
+    response = chat.generate_content(
+        [{"role": "user", "parts": msg}] # <-- No "system" role
+    )
+
+    raw_output = response.text
+    cleaned_output = clean_output(raw_output)
+    print("Code generated...")
+    return cleaned_output
+
+def gemini_fixer(kernel: str, error: str, msg: str, model: str = "gemini-2.5-flash", outputIR: str = "CUDA"):
+    """Fixes the previously generated kernel using Gemini.
+    ...
+    """
+    sys_prompt = prompts.get_fixer_sys_prompt(outputIR)
+    prompt = prompts.generate_fixer_prompt(kernel, error, msg)
+    
+    # Create the model WITH the system prompt
+    chat = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=sys_prompt  # <-- Pass system prompt here
+    )
+    
+    # Send ONLY the user message (which contains the 'prompt')
+    response = chat.generate_content(
+        [{"role": "user", "parts": prompt}] # <-- No "system" role
+    )
+
+    raw_output = response.text
+    cleaned_output = clean_output(raw_output)
     return cleaned_output
