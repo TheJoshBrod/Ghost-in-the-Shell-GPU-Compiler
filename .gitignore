@@ -5,8 +5,8 @@
 ## Dont commit test output or temporary files
 tmp
 output
-initial_testing.json_*
-
+generated_kernels/*
+!generated_kernels/.gitkeep
 
 # Python
 *.pyc
