@@ -33,9 +33,6 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
         exec(f"{definition['variable']} = {definition['value']}", context)
 
     for op_index, op in enumerate(program["operations"]):
-        
-        # --- [THIS IS THE NEW LOGIC] ---
-        # Assumes new JSON format
         try:
             assignment_name = op["assignment"]
             op_name = op["operation"]
@@ -65,8 +62,6 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
         except Exception as e:
             print(f"Failed to profile op {op_index}: {e}. Skipping.")
             continue
-            
-        # --- [Your existing validation loop goes here, with minor changes] ---
         
         # 5. Save tensors for the verifier
         op_id_str = f"{benchmark_name}_{benchmark_counter}_op{op_index}"
@@ -79,7 +74,7 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
         # 6. Initial Generation
         print("Generating initial code...")
         try:
-            cu_code, cpp_code = src.generator.gemini_generator(op_details)
+            cu_code = src.generator.gemini_generator(op_details)
         except Exception as e:
             print(f"Initial generation failed: {e}. Skipping op.")
             continue
@@ -90,30 +85,27 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
             print(f"--- Attempt {i+1}/{MAX_ATTEMPTS} for Op {op_index} ---")
 
             call_success, exec_success, feedback = src.verifier.validate_kernel(
-                cu_code, cpp_code, input_path, gold_path
+                cu_code, input_path, gold_path
             )
             
             # Log the attempt
             with open(f"generated_kernels/{op_id_str}_iter{i}.log", "w") as f:
                 f.write(f"--- FEEDBACK ---\n{feedback}\n\n")
                 f.write(f"--- KERNEL.CU ---\n{cu_code}\n\n")
-                f.write(f"--- WRAPPER.CPP ---\n{cpp_code}\n\n")
                 
             is_valid = call_success and exec_success
             
             if is_valid:
                 print(f"Validation SUCCESSFUL for Op {op_index} on attempt {i+1}!")
-                with open(f"generated_kernels/{op_id_str}_final.cu", "w") as f:
+                with open(f"generated_kernels/{op_id_str}_kernel_final.cu", "w") as f:
                     f.write(cu_code)
-                with open(f"generated_kernels/{op_id_str}_final.cpp", "w") as f:
-                    f.write(cpp_code)
                 break # Success! Move to next operation
             
             if i < MAX_ATTEMPTS - 1:
                 print("Validation FAILED. Attempting to fix...")
                 try:
-                    cu_code, cpp_code = src.generator.gemini_fixer(
-                        cu_code, cpp_code, feedback, op_details
+                    cu_code = src.generator.gemini_fixer(
+                        cu_code, feedback, op_details
                     )
                 except Exception as e:
                     print(f"Fixer failed: {e}. Stopping attempts for this op.")
@@ -122,10 +114,8 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
         if not is_valid:
             print(f"Failed to generate correct kernel for Op {op_index} after {MAX_ATTEMPTS} attempts.")
             # Save failed attempt
-            with open(f"generated_kernels/{op_id_str}_final_FAILED.cu", "w") as f:
+            with open(f"generated_kernels/{op_id_str}_kernel_final_FAILED.cu", "w") as f:
                 f.write(cu_code)
-            with open(f"generated_kernels/{op_id_str}_final_FAILED.cpp", "w") as f:
-                f.write(cpp_code)
 
         # 8. CRITICAL: Execute the op in the main context
         # This makes its output (e.g., 'c') available for the next op (e.g., 'd = sin(c)')
@@ -144,7 +134,6 @@ def main():
 
     for i, program in enumerate(benchmarks):
         process_benchmark(program, i, benchmark_name)
-        counter += 1
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

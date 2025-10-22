@@ -14,48 +14,38 @@ import logging
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
+
 def validate_kernel(
     generated_cu_code: str,
-    generated_cpp_code: str,
     input_tensor_path: str,
     ground_truth_path: str,
     timeout_seconds: int = 120
 ) -> tuple[bool, bool, str]:
     """
-    Validates a CUDA kernel using the PyTorch C++ extension API.
+    Validates a single-file CUDA kernel using the PyTorch C++ extension API.
     ...
     """
 
     tmpdir = tempfile.mkdtemp(prefix="gins_verifier_")
     log_message = ""
 
-    # --- FIX 1: Define all status variables at the top ---
     call_success = False
     exec_success = False
     runtime_success = False # Add this for clarity
 
     try:
+        # --- 1. Stage 1: Write Code to File ---
         cu_path = os.path.join(tmpdir, "kernel.cu")
         
-        # --- FIX 2: Save the wrapper as a .cu file, not .cpp ---
-        # This tells torch.utils.load() to use NVCC (the CUDA compiler)
-        wrapper_cu_path = os.path.join(tmpdir, "wrapper.cu") 
-
         with open(cu_path, "w", encoding="utf-8") as f:
             f.write(generated_cu_code)
-        
-        with open(wrapper_cu_path, "w", encoding="utf-8") as f:
-            f.write(generated_cpp_code)
 
         # --- 2. Stage 1: Call Status (Compilation) ---
         log.info(f"Attempting JIT compilation in {tmpdir}...")
         try:
             module = load(
                 name=f"generated_module_{os.path.basename(tmpdir)}",
-                
-                # --- FIX 3: Pass BOTH .cu files to the loader ---
-                sources=[wrapper_cu_path, cu_path],
-                
+                sources=[cu_path],
                 build_directory=tmpdir,
                 verbose=True, 
             )
@@ -64,7 +54,7 @@ def validate_kernel(
             log.info("Compilation successful.")
 
         except Exception as e:
-            # --- FIX 4: Correctly handle compilation failure ---
+            # --- Handle compilation failure ---
             call_success = False
             exec_success = False
             log_message = f"Compilation Failed (Call Status=False):\n{e}"
@@ -83,17 +73,18 @@ def validate_kernel(
             # Ensure inputs are on GPU
             cuda_inputs = [t.cuda() for t in inputs]
             
-            # Create an empty output tensor with the correct shape/type
-            output_generated = torch.empty_like(ground_truth)
+            # Call the compiled kernel (it returns the output tensor)
+            output_generated = module.launch(*cuda_inputs)
             
-            # Call the compiled kernel function
-            module.launch(*cuda_inputs, output_generated)
+            # Move to same device as ground truth if needed
+            if not output_generated.is_cuda:
+                output_generated = output_generated.cuda()
             
             # Kernel executed without a runtime error
             runtime_success = True
 
         except Exception as e:
-            # --- FIX 5: Handle runtime (not compilation) errors ---
+            # --- Handle runtime (not compilation) errors ---
             runtime_success = False
             exec_success = False
             log_message += f"Kernel Runtime Error (Exec Status=False):\n{e}"
@@ -125,6 +116,7 @@ def validate_kernel(
                 exec_success = False
                 log_message += f"Output Comparison Error (Exec Status=False):\n{e}"
                 log.warning(log_message)
+
 
         # Final return
         return call_success, exec_success, log_message

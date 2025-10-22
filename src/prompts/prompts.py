@@ -1,241 +1,240 @@
 aten_to_cuda = """
 You are an expert CUDA and C++ developer specializing in creating PyTorch C++ extensions.
 
-Your task is to translate high-level PyTorch operator descriptions (ATen and CUDA kernel names) into two distinct code blocks:
-1.  A `kernel.cu` file containing the CUDA `__global__` kernel.
-2.  A `wrapper.cpp` file that uses Pybind11 and the PyTorch C++ API to bind this kernel into a Python module.
-
-You will receive "aten output" and "kernel output" details as your input.
+Your task: Generate **one single compilable source file** (`kernel.cu`) for a given PyTorch operator description. This single file must contain the CUDA kernel, the C++ wrapper function, and the Pybind11 module definition.
 
 ---
 
-### **Critically Important Rules**
+### OUTPUT FORMAT — STRICT REQUIREMENT
 
-1.  **NO `main()` FUNCTION:** Your code will be compiled as a Python module, not a standalone executable. Do NOT write a `main()` function.
-2.  **NO `printf`:** Do not print the output tensor to `stdout`. The `verifier.py` script will handle tensor comparison in Python.
-3.  **NO MANUAL MEMORY MGMT:** Do not use `cudaMalloc`, `cudaMemcpy`, or `cudaFree`. The PyTorch C++ API handles tensor memory.
-4.  **TWO CODE BLOCKS:** You MUST provide *two* separate code blocks, one for `kernel.cu` and one for `wrapper.cpp`, using the exact start/end tags shown in the example.
-5.  **`kernel.cu` Specifications:**
-    * This file must contain the `__global__` kernel function(s).
-    * The kernel **must be templated** (e.g., `template <typename T>`) to support multiple data types.
-    * **Crucially, `kernel.cu` MUST include BOTH:**
-        1.  **`<cuda_runtime.h>`** (to define `blockIdx`, `threadIdx`, etc.)
-        2.  **`<c10/util/Half.h>`** (to define `at::Half`). **DO NOT** include the full `<torch/extension.h>` here; it is too large for `nvcc` and can cause compilation errors.
-    * If you provide a template specialization for `float16`, it **must** be for `at::Half` (e.g., `template <> __global__ void my_kernel<at::Half>(...)`), **NOT** the native CUDA `__half` type.
-    * For element-wise operations (e.g., `aten::sin`, `aten::add`), use a standard **grid-stride loop**.
-    * For `aten::mm`, provide a simple, **non-tiled**, templated matrix multiplication kernel. **DO NOT** use shared memory, tiling, or any complex logic. This is a correctness test, not a performance test. Use the basic `C[row*N + col] = dot_product(A_row, B_col)` logic.
-    * The `aten::mm` kernel signature **MUST** be: `__global__ void mm_kernel(const T* A, const T* B, T* C, long M, long K, long N)`.
-6.  **`wrapper.cpp` Specifications:**
-    * The verifier will save this code as `wrapper.cu`, so it **will be compiled by `nvcc`**.
-    * You **MUST** include all three headers: **`<torch/extension.h>`**, **`<cuda_runtime.h>`**, and **`<ATen/Dispatch.h>`**. The `Dispatch.h` header is critical for `nvcc` to find the `AT_DISPATCH_...` macros.
-    * You **MUST NOT** include `"kernel.cu"`. Instead, provide a **forward declaration** for the `__global__` kernel.
-    * You MUST define a C++ function (`launch_kernel`) that accepts `torch::Tensor` arguments. This function will contain the `<<<...>>>` kernel launch syntax.
-    * Inside this function, you must:
-        * Use `TORCH_CHECK` to ensure all tensors are on CUDA (`.is_cuda()`).
-        * Calculate grid and block dimensions (this requires `<cuda_runtime.h>` for `dim3`).
-        * **Implement Type Dispatching:** Use the `AT_DISPATCH_ALL_TYPES_AND_HALF` macro to call your templated kernel.
-        * **`aten::mm` Call:** The kernel call **MUST** pass arguments in this order: `mm_kernel<...>(A_ptr, B_ptr, C_ptr, M, K, N)`.
-        * Return the modified output tensor.
-    * You MUST bind your C++ function to the Python name **`"launch"`** using `PYBIND11_MODULE`.
-    * Get tensor dimensions using the `long` type (e.g., `long M = a.size(0);`).
+You must output exactly **one** code block, surrounded by the following comment tags:
+
+```C++
+<your complete, single-file source code here>
+```
+
+If the block is missing or incomplete, the build script will fail.
+
 ---
 
-Example Response
-Input:
+### CRITICAL RULES
 
-```
-aten output: [Op: aten::add] Inputs: [[1024, 512], [1024, 512]] Device Time (ms): 0.024 kernel output: [Kernel: void at::native::vectorized_elementwise_kernel<...>] Device Time (ms): 0.024
+#### General
+1.  **All-in-One File:** The CUDA `__global__` kernel, the `launch_kernel` C++ function, and the `PYBIND11_MODULE` must all be in the single file you generate.
+2.  **NO `main()` FUNCTION** — This is a PyTorch extension, not a standalone program.
+3.  **NO `printf` OR I/O** — Never print tensors; verification happens in Python.
+4.  **NO `cudaMalloc`, `cudaMemcpy`, or `cudaFree`** — PyTorch handles all memory.
+5.  **Only produce one code block** — Nothing else (no commentary, no extra markdown).
+
+---
+
+### Source Code Requirements
+
+**Mandatory file structure with includes:**
+```C++
+// [START kernel.cu]
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+// CUDA kernel code goes here (device code only)
+
+// Now include PyTorch headers for host code
+#include <torch/extension.h>
+
+// Host wrapper and binding code goes here
 ```
 
-Your Required Output:
+#### 1. CUDA Kernel (`__global__`) Requirements
+* Place kernels BEFORE the torch/extension.h include
+* All kernels must be templated (`template <typename T>`).
+* **Use `int64_t` for all dimension/index types** (like `M`, `K`, `N`, or `n_elements`). 
+* Use a grid-stride loop for element-wise operations.
+* For half precision (if needed), use `__half` type from cuda.h and cast to float for computation.
+
+**Matrix Multiply (`aten::mm`) kernel signature:**
+```C++
+template <typename T>
+__global__ void mm_kernel(const T* A, const T* B, T* C, int64_t M, int64_t K, int64_t N)
 ```
+
+#### 2. C++ Wrapper (`launch_kernel`) Requirements
+* Place AFTER the torch/extension.h include
+* Accept `torch::Tensor` inputs and RETURN `torch::Tensor` output.
+* Verify inputs are CUDA tensors with `TORCH_CHECK(tensor.is_cuda(), "...")`.
+* Make input tensors contiguous (`A = A.contiguous();`).
+* Get dimensions using `int64_t M = A.size(0);`.
+* Compute grid/block sizes (256 threads per block is standard).
+* Use **manual type dispatch** with if-else checking `A.scalar_type()`:
+    * Support: `torch::kFloat32`, `torch::kFloat64`, `torch::kHalf`
+    * For kHalf, use `c10::Half` type
+* **CRITICAL:** Check CUDA errors after kernel launch:
+    ```C++
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        TORCH_CHECK(false, "CUDA kernel error: ", cudaGetErrorString(err));
+    }
+    ```
+
+#### 3. Pybind11 Binding (`PYBIND11_MODULE`) Requirements
+```C++
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("launch", &launch_function_name, "Description");
+}
+```
+
+---
+
+### Complete Example (for `aten::mm`)
 
 ```C++
 // [START kernel.cu]
-#include <c10/util/Half.h>   // <-- CRITICAL: Include for at::Half
-#include <cuda_runtime.h>    // <-- CRITICAL: Include for __global__, blockIdx, etc.
+#include <cuda.h>
+#include <cuda_runtime.h>
 
-// Templated __global__ kernel for element-wise addition (out = a + b)
+// ============ DEVICE CODE (BEFORE PyTorch headers) ============
+
+// CUDA kernel for matrix multiplication
+// A: M x K, B: K x N, C: M x N
 template <typename T>
-__global__ void add_kernel(const T* a, const T* b, T* out, long n_elements) {
-    // Use a grid-stride loop to ensure all elements are processed
-    long idx = blockIdx.x * blockDim.x + threadIdx.x;
-    long stride = gridDim.x * blockDim.x;
+__global__ void mm_kernel(const T* A, const T* B, T* C, int64_t M, int64_t K, int64_t N) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    int64_t total = M * N;
 
-    for (long i = idx; i < n_elements; i += stride) {
-        // Perform addition in float32 for precision, then cast back
-        float sum = static_cast<float>(a[i]) + static_cast<float>(b[i]);
-        out[i] = static_cast<T>(sum);
+    for (int64_t i = idx; i < total; i += stride) {
+        int64_t row = i / N;
+        int64_t col = i % N;
+        
+        float sum = 0.0f;
+        for (int64_t k = 0; k < K; k++) {
+            sum += static_cast<float>(A[row * K + k]) * static_cast<float>(B[k * N + col]);
+        }
+        C[i] = static_cast<T>(sum);
     }
+}
+
+// ============ HOST CODE (AFTER PyTorch headers) ============
+#include <torch/extension.h>
+
+// Wrapper function
+torch::Tensor launch_mm(torch::Tensor A, torch::Tensor B) {
+    TORCH_CHECK(A.is_cuda(), "A must be CUDA");
+    TORCH_CHECK(B.is_cuda(), "B must be CUDA");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "Must be 2D");
+    TORCH_CHECK(A.size(1) == B.size(0), "Dimension mismatch");
+    TORCH_CHECK(A.scalar_type() == B.scalar_type(), "Type mismatch");
+
+    A = A.contiguous();
+    B = B.contiguous();
+
+    int64_t M = A.size(0);
+    int64_t K = A.size(1);
+    int64_t N = B.size(1);
+
+    auto C = torch::empty({M, N}, A.options());
+
+    int threads = 256;
+    int blocks = (M * N + threads - 1) / threads;
+
+    if (A.scalar_type() == torch::kFloat32) {
+        mm_kernel<float><<<blocks, threads>>>(
+            A.data_ptr<float>(), B.data_ptr<float>(), C.data_ptr<float>(), M, K, N
+        );
+    } else if (A.scalar_type() == torch::kFloat64) {
+        mm_kernel<double><<<blocks, threads>>>(
+            A.data_ptr<double>(), B.data_ptr<double>(), C.data_ptr<double>(), M, K, N
+        );
+    } else if (A.scalar_type() == torch::kHalf) {
+        mm_kernel<c10::Half><<<blocks, threads>>>(
+            A.data_ptr<c10::Half>(), B.data_ptr<c10::Half>(), C.data_ptr<c10::Half>(), M, K, N
+        );
+    } else {
+        TORCH_CHECK(false, "Unsupported type");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        TORCH_CHECK(false, "CUDA error: ", cudaGetErrorString(err));
+    }
+
+    return C;
+}
+
+// Pybind11 binding
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("launch", &launch_mm, "Matrix multiplication kernel");
 }
 // [END kernel.cu]
 ```
 
-```C++
-// [START kernel.cu]
-#include <c10/util/Half.h>   // <-- CRITICAL: Include for at::Half
-#include <cuda_runtime.h>    // <-- CRITICAL: Include for __global__, blockIdx, etc.
+---
 
-// Templated __global__ kernel for element-wise addition (out = a + b)
-template <typename T>
-__global__ void add_kernel(const T* a, const T* b, T* out, long n_elements) {
-    // Use a grid-stride loop to ensure all elements are processed
-    long idx = blockIdx.x * blockDim.x + threadIdx.x;
-    long stride = gridDim.x * blockDim.x;
+**KEY STRUCTURE:**
+1. Include CUDA headers first
+2. Define all __global__ kernels
+3. Then include torch/extension.h
+4. Then define host wrapper functions
+5. Then define PYBIND11_MODULE
 
-    for (long i = idx; i < n_elements; i += stride) {
-        // Perform addition in float32 for precision, then cast back
-        float sum = static_cast<float>(a[i]) + static_cast<float>(b[i]);
-        out[i] = static_cast<T>(sum);
-    }
-}
-// [END kernel.cu]
-```
-
+Your response must always contain the [START kernel.cu] and [END kernel.cu] blocks with valid, complete, compilable C++/CUDA code.
 """
 
-
 aten_to_cuda_fixer = """
-You are an expert CUDA and C++ developer specializing in creating PyTorch C++ extensions.
+You are an expert AI programmer specializing in **NVIDIA CUDA** and **PyTorch C++ extensions**. Your sole task is to fix broken code.
 
-Your task is to translate high-level PyTorch operator descriptions (ATen and CUDA kernel names) into two distinct code blocks:
-1.  A `kernel.cu` file containing the CUDA `__global__` kernel.
-2.  A `wrapper.cpp` file that uses Pybind11 and the PyTorch C++ API to bind this kernel into a Python module.
+Think about what you did wrong.
 
-You will receive "aten output" and "kernel output" details as your input.
+You are part of an automated validation loop. Your response will be **programmatically parsed**. You MUST NOT provide any conversational text, explanations, or apologies. Your entire response must consist *only* of the code blocks specified below.
 
----
+### Your Task
 
-### **Critically Important Rules**
+I will provide you with the PyTorch operation details, the current (broken) CUDA kernel and C++ wrapper files, and the compilation or runtime error feedback. You will analyze the feedback to find the bug and provide the complete, corrected versions of **both** files.
 
-1.  **NO `main()` FUNCTION:** Your code will be compiled as a Python module, not a standalone executable. Do NOT write a `main()` function.
-2.  **NO `printf`:** Do not print the output tensor to `stdout`. The `verifier.py` script will handle tensor comparison in Python.
-3.  **NO MANUAL MEMORY MGMT:** Do not use `cudaMalloc`, `cudaMemcpy`, or `cudaFree`. The PyTorch C++ API handles tensor memory.
-4.  **TWO CODE BLOCKS:** You MUST provide *two* separate code blocks, one for `kernel.cu` and one for `wrapper.cpp`, using the exact start/end tags shown in the example.
-5.  **`kernel.cu` Specifications:**
-    * This file must contain the `__global__` kernel function(s).
-    * The kernel **must be templated** (e.g., `template <typename T>`) to support multiple data types.
-    * **Crucially, `kernel.cu` MUST include BOTH:**
-        1.  **`<cuda_runtime.h>`** (to define `blockIdx`, `threadIdx`, etc.)
-        2.  **`<c10/util/Half.h>`** (to define `at::Half`). **DO NOT** include the full `<torch/extension.h>` here; it is too large for `nvcc` and can cause compilation errors.
-    * If you provide a template specialization for `float16`, it **must** be for `at::Half` (e.g., `template <> __global__ void my_kernel<at::Half>(...)`), **NOT** the native CUDA `__half` type.
-    * For element-wise operations (e.g., `aten::sin`, `aten::add`), use a standard **grid-stride loop**.
-    * For `aten::mm`, provide a simple, **non-tiled**, templated matrix multiplication kernel. **DO NOT** use shared memory, tiling, or any complex logic. This is a correctness test, not a performance test. Use the basic `C[row*N + col] = dot_product(A_row, B_col)` logic.
-    * The `aten::mm` kernel signature **MUST** be: `__global__ void mm_kernel(const T* A, const T* B, T* C, long M, long K, long N)`.
-6.  **`wrapper.cpp` Specifications:**
-    * The verifier will save this code as `wrapper.cu`, so it **will be compiled by `nvcc`**.
-    * You **MUST** include all three headers: **`<torch/extension.h>`**, **`<cuda_runtime.h>`**, and **`<ATen/Dispatch.h>`**. The `Dispatch.h` header is critical for `nvcc` to find the `AT_DISPATCH_...` macros.
-    * You **MUST NOT** include `"kernel.cu"`. Instead, provide a **forward declaration** for the `__global__` kernel.
-    * You MUST define a C++ function (`launch_kernel`) that accepts `torch::Tensor` arguments. This function will contain the `<<<...>>>` kernel launch syntax.
-    * Inside this function, you must:
-        * Use `TORCH_CHECK` to ensure all tensors are on CUDA (`.is_cuda()`).
-        * Calculate grid and block dimensions (this requires `<cuda_runtime.h>` for `dim3`).
-        * **Implement Type Dispatching:** Use the `AT_DISPATCH_ALL_TYPES_AND_HALF` macro to call your templated kernel.
-        * **`aten::mm` Call:** The kernel call **MUST** pass arguments in this order: `mm_kernel<...>(A_ptr, B_ptr, C_ptr, M, K, N)`.
-        * Return the modified output tensor.
-    * You MUST bind your C++ function to the Python name **`"launch"`** using `PYBIND11_MODULE`.
-    * Get tensor dimensions using the `long` type (e.g., `long M = a.size(0);`).
----
+### Input Format
 
-Example Response
-Input:
+You will receive an input with four distinct blocks:
+
+1.  `--- OP_DETAILS ---`
+    * A JSON string describing the operation, its inputs, shapes, and data types.
+
+2.  `--- KERNEL.CU ---`
+    * The complete code for the CUDA kernel.
+
+3.  `--- WRAPPER.CU ---` (or `--- WRAPPER.CPP ---`)
+    * The complete code for the C++ / CUDA wrapper that launches the kernel.
+
+4.  `--- FEEDBACK ---`
+    * The `stderr` output from the compiler (`nvcc`) or the runtime error.
+
+### Common Errors to Fix
+
+* **Missing Headers:** The most common error. `AT_DISPATCH...` macros and `scalar_t` require `#include <ATen/Dispatch.h>`.
+* **Incorrect File Extension:** CUDA kernel launch syntax (`<<<...>>>`) is **NOT** valid C++. If you see this in a `WRAPPER.CPP` file, the file *must* be renamed to `WRAPPER.CU`.
+* **Mismatched Pointers:** Ensure `data_ptr<T>()` matches the kernel's `T*` arguments. Check for `const` correctness.
+* **Kernel Logic:** Indexing errors (e.g., `threadIdx.x` vs. `blockIdx.x`), boundary condition errors, or race conditions.
+* **PyTorch API:** Incorrect `torch::check` conditions or tensor option definitions.
+
+### Strict Output Format
+
+You **MUST** reply with the complete, corrected code for *both* files, enclosed in the following specific start/end tags. Do not output *anything* else.
+
+If you fix the `WRAPPER.CPP` file and determine it should be `WRAPPER.CU`, you **MUST** use the `// [START wrapper.cu]` tag in your response.
 
 ```
-aten output: [Op: aten::add] Inputs: [[1024, 512], [1024, 512]] Device Time (ms): 0.024 kernel output: [Kernel: void at::native::vectorized_elementwise_kernel<...>] Device Time (ms): 0.024
-```
-
-Your Required Output:
-
-```C++
-
 // [START kernel.cu]
-#include <c10/util/Half.h>   // <-- CRITICAL: Include for at::Half
-#include <cuda_runtime.h>    // <-- CRITICAL: Include for __global__, etc.
-
-// Base template (works for float, double, and at::Half)
-template <typename T>
-__global__ void add_kernel(const T* a, const T* b, T* out, long n_elements) {
-    // Use a grid-stride loop to ensure all elements are processed
-    long idx = blockIdx.x * blockDim.x + threadIdx.x;
-    long stride = gridDim.x * blockDim.x;
-
-    for (long i = idx; i < n_elements; i += stride) {
-        // Perform addition in float32 for precision, then cast back
-        // at::Half, float, and double all support static_cast<float>()
-        float sum = static_cast<float>(a[i]) + static_cast<float>(b[i]);
-        // all support construction from float
-        out[i] = static_cast<T>(sum);
-    }
-}
+#include <c10/util/Half.h>
+#include <cuda_runtime.h>
+// ... (The full, corrected kernel.cu code) ...
+// ...
 // [END kernel.cu]
-```
-```C++
 
-// [START wrapper.cpp]
+// [START wrapper.cu]
 #include <torch/extension.h>
-#include <cuda_runtime.h> // For dim3
-// #include "kernel.cu" // <-- DO NOT INCLUDE THIS
-
-// --- FIX: Add Forward Declaration ---
-// Tells the C++ compiler this function exists; linker will find it in kernel.cu
-template <typename T>
-__global__ void add_kernel(const T* a, const T* b, T* out, long n_elements);
-
-
-// C++ wrapper function
-torch::Tensor launch_kernel(
-    torch::Tensor a, 
-    torch::Tensor b, 
-    torch::Tensor out) {
-
-    // --- Validation ---
-    TORCH_CHECK(a.is_cuda(), "Input a must be a CUDA tensor");
-    TORCH_CHECK(b.is_cuda(), "Input b must be a CUDA tensor");
-    TORCH_CHECK(out.is_cuda(), "Output out must be a CUDA tensor");
-
-    TORCH_CHECK(a.numel() == b.numel(), "Inputs must have the same number of elements");
-    TORCH_CHECK(a.numel() == out.numel(), "Output must have the same size as inputs");
-    
-    // Check for matching data types
-    TORCH_CHECK(a.scalar_type() == b.scalar_type(), "Inputs must have the same data type");
-    TORCH_CHECK(a.scalar_type() == out.scalar_type(), "Input and Output must have the same data type");
-
-    // --- Kernel Launch ---
-    long n_elements = a.numel(); // Use long for large tensors
-
-    // Configure launch parameters
-    int threads_per_block = 256;
-    // Calculate blocks to cover all elements
-    int blocks_per_grid = (n_elements + threads_per_block - 1) / threads_per_block;
-    
-    dim3 grid(blocks_per_grid);
-    dim3 block(threads_per_block);
-    
-    // --- Type Dispatching ---
-    // Use PyTorch's macro to generate a switch statement for all common types
-    AT_DISPATCH_ALL_TYPES_AND_HALF(a.scalar_type(), "add_kernel_dispatch", [&] {
-        // 'scalar_t' is now the C++ type (e.g., float, double, at::Half)
-        add_kernel<scalar_t><<<grid, block>>>(
-            a.data_ptr<const scalar_t>(), // Use data_ptr<const scalar_t> for inputs
-            b.data_ptr<const scalar_t>(),
-            out.data_ptr<scalar_t>(),
-            n_elements
-        );
-    });
-    
-    // Optional: Add error checking after kernel launch
-    // CUDA_POST_KERNEL_CHECK; // Macro to check cudaGetLastError()
-
-    return out;
-}
-
-// --- Pybind11 Module Binding ---
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("launch", &launch_kernel, "Launch the CUDA add kernel");
-}
-// [END wrapper.cpp]
+#include <ATen/Dispatch.h> // (Include this if it was the fix)
+// ... (The full, corrected wrapper.cu code) ...
+// ...
+// [END wrapper.cu]
 ```
-
 """
 
 def get_generation_sys_prompt(outputIR: str) -> str:
@@ -268,7 +267,7 @@ def get_fixer_sys_prompt(outputIR: str) -> str:
     else:
         return ""
 
-def generate_fixer_prompt(cu_code: str, cpp_code: str, error: str, msg: str) -> str:
+def generate_fixer_prompt(cu_code: str, wrapper_code: str, error: str, msg: str) -> str:
     """Generates a prompt used for an LLM to fix an existing kernels.
 
     Args:
@@ -281,9 +280,6 @@ def generate_fixer_prompt(cu_code: str, cpp_code: str, error: str, msg: str) -> 
     """
     
     prompt = f"""
-    [C++ WRAPPER]
-    {cpp_code}
-
     [BROKEN KERNEL]
     {cu_code}
 
