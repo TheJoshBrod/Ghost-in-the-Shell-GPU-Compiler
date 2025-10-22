@@ -267,7 +267,7 @@ def get_fixer_sys_prompt(outputIR: str) -> str:
     else:
         return ""
 
-def generate_fixer_prompt(cu_code: str, wrapper_code: str, error: str, msg: str) -> str:
+def generate_fixer_prompt(cu_code: str, error: str, msg: str) -> str:
     """Generates a prompt used for an LLM to fix an existing kernels.
 
     Args:

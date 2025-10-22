@@ -4,7 +4,24 @@ import google.generativeai as genai
 from src.prompts import prompts
 
 def cleanup_mkdown(input: str) -> str:
-    return input.split("```C++")[1].split("```")[0]
+    """Extract code from markdown code blocks using regex."""
+
+    # Try to match code blocks with language specifiers (C++, cpp, cuda, c)
+    pattern = r"```(?:C\+\+|cpp|cuda|c)\s*\n(.*?)```"
+    match = re.search(pattern, input, re.DOTALL | re.IGNORECASE)
+    
+    if match:
+        return match.group(1).strip()
+    
+    # Try generic code block without language specifier
+    pattern = r"```\s*\n(.*?)```"
+    match = re.search(pattern, input, re.DOTALL)
+    
+    if match:
+        return match.group(1).strip()
+    
+    # No markdown found, return as-is
+    return input.strip()
 
 
 def ollama_generator(msg: str, model: str = "llama3.2:latest", outputIR: str = "CUDA") -> str:
@@ -81,7 +98,7 @@ def gemini_fixer(cu_code: str, error: str, msg: str, model: str = "gemini-2.5-fl
     Args:
         cu_code (str): Previous version of the malformed/incorrect .cu kernel
         error (str): Custom error message to inform what the LLM did wrong 
-        msg (str): Context the ORIGINAL LLM had to generate Kernel/IR
+        msg (str): Op details from initial run
         model (str): Gemini model
         outputIR (str): what output we want
 
@@ -101,6 +118,6 @@ def gemini_fixer(cu_code: str, error: str, msg: str, model: str = "gemini-2.5-fl
         [{"role": "user", "parts": [prompt]}]
     )
 
-    new_cu_code = response.text
+    new_cu_code = cleanup_mkdown(response.text)
     
-    return cleanup_mkdown(new_cu_code)
+    return new_cu_code
