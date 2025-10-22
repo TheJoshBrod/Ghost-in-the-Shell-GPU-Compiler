@@ -1,0 +1,14 @@
+[
+    {
+        "operations": [
+            {"assignment": "c", "operation": "torch.matmul(a, b)"},
+            {"assignment": "d", "operation": "torch.sin(c)"},
+            {"assignment": "output", "operation": "torch.sin(c)"}
+        ],
+
+        "definitions": [
+            {"variable": "a", "value": "torch.randn(2048, 2048, device=\"cuda\")"},
+            {"variable": "b", "value": "torch.randn(2048, 2048, device=\"cuda\")"}
+        ]
+    }
+]
