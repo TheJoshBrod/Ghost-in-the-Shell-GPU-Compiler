@@ -1,9 +1,21 @@
 [
     {
         "operations": [
-            {"assignment": "c", "operation": "torch.matmul(a, b)"},
-            {"assignment": "d", "operation": "torch.sin(c)"},
-            {"assignment": "output", "operation": "torch.sin(c)"}
+            {
+                "assignment": "c",
+                "operation": "torch.matmul",
+                "inputs": ["a", "b"]
+            },
+            {
+                "assignment": "d",
+                "operation": "torch.sin",
+                "inputs": ["c"]
+            },
+            {
+                "assignment": "output",
+                "operation": "torch.sin",
+                "inputs": ["c"]
+            }
         ],
 
         "definitions": [
