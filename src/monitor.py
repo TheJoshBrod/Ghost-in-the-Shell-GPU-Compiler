@@ -4,7 +4,6 @@ import torch
 aten_output: str = ""
 kernel_output: str = ""
 
-
 if not torch.cuda.is_available():
     raise RuntimeError("This example requires a CUDA-enabled PyTorch installation.")
 
@@ -42,52 +41,47 @@ def handle_trace(prof):
                 kernel_output += f"  Device Time (ms): {event.self_device_time_total / 1000:.3f}\n"
 
 
-def extract_op_details(program: list[str]):
-    """Extracts relevant information of sample PyTorch code including: 
-    - High level kernel PyTorch operators
-    - Names of PyTorch’s internal CUDA kernel/cuBLAS kernels/etc.
-    - Correct output given the input
+def profile_single_op(context: dict, full_exec_string: str) -> tuple[torch.Tensor, str]:
+    """
+    Profiles a *single line* of PyTorch code and returns its output tensor
+    and the formatted op_details string.
     
     Args:
-        inputs (list[str]): List of inputs that the sample takes (values, size, etc.)
-        code (str): Literal PyTorch code to be executed
-    
+        context (dict): The current execution context containing defined variables (like 'a' and 'b').
+        full_exec_string (str): The single line of code to execute (e.g., "c = torch.matmul(a, b)").
+        
     Output:
-        str: Correct value of the PyTorch sample
-        str: Formatted string of high Aten representation of sample
-        str: Formatted string of low level kernel names of sample
+        ground_truth_tensor (torch.Tensor): The resulting tensor (e.g., 'c').
+        op_details (str): Formatted string of Aten/kernel info for the LLM.
     """
-
-    # Set state to be deterministic
+    
+    # 1. Reset global profiler strings for this specific op
+    global aten_output, kernel_output
+    aten_output = ""
+    kernel_output = ""
+    
+    # 2. Set deterministic state
     torch.cuda.manual_seed(100)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+    # 3. We'll run the profiler for just a few steps on this one op
+    # (wait, warmup, active)
+    schedule = torch.profiler.schedule(wait=1, warmup=1, active=1, repeat=1)
     
-    print("\n[Main Thread] Starting profiled execution...")
+    # 4. Create a *copy* of the context to safely execute the line
+    # This ensures we don't modify the main context if exec fails
+    # (though main.py will update its own context upon success)
+    temp_context = context.copy()
     
-    context = {"torch": torch}
+    # 5. Get the name of the variable being assigned
+    # e.g., "c = torch.matmul(a, b)" -> "c"
+    try:
+        assignment_name = full_exec_string.split('=')[0].strip()
+    except Exception:
+        raise ValueError(f"Operation '{full_exec_string}' is not a valid assignment.")
 
-    # execute definitions
-    for definition in program["definitions"]:
-        var = definition["variable"]
-        val = definition["value"]
-        exec(f"{var} = {val}", context)
-
-    print("\n[Main Thread] Executed definitions...")
-    
-    wait_steps = 1
-    warmup_steps = 1
-    active_steps = 2
-    repeat_cycles = 1
-
-    # Create the schedule function
-    schedule = torch.profiler.schedule(
-        wait=wait_steps, 
-        warmup=warmup_steps, 
-        active=active_steps, 
-        repeat=repeat_cycles
-    )
-
+    # 6. Run the profiler
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
@@ -96,25 +90,17 @@ def extract_op_details(program: list[str]):
         schedule=schedule,
         on_trace_ready=handle_trace,
         record_shapes=True
-    ) as p:    
-        # --- Calculate the total number of steps for the loop ---
-        total_steps = (wait_steps + warmup_steps + active_steps) * repeat_cycles
-        for i in range(total_steps):
-            
-            for op in program["operations"]:
-                assignment = op["assignment"]
-                operation = op["operation"]
-                exec(f"{assignment} = {operation}", context)
+    ) as p:
+        for _ in range(3): # Total steps: wait + warmup + active
+            exec(full_exec_string, temp_context)
             p.step()
 
+    # 7. Get the resulting tensor from the temporary context
+    ground_truth_tensor = temp_context.get(assignment_name)
+    if ground_truth_tensor is None or not isinstance(ground_truth_tensor, torch.Tensor):
+        raise ValueError(f"Failed to get output tensor '{assignment_name}' from context after exec.")
 
-        # TODO:
-        # I put this here to guarantee profiler is done before continuing
-        # It turns the execution to be synchronous, I don't think it breaks anything but should be looked into.  
-        p.stop()
-        handle_trace(p)
-
-        # TODO: Get output variable?
-        output = context.get("output", None)
-
-    return output, aten_output, kernel_output
+    # 8. Format op_details string for the LLM
+    op_details = f"aten output:\n{aten_output}\n\n\nkernel output:\n{kernel_output}"
+    
+    return ground_truth_tensor, op_details

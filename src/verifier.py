@@ -1,142 +1,139 @@
-"""Iterative toolchain to take different IRs with input and outputs and """
+"""
+src/verifier.py
+Validates a generated CUDA kernel by compiling it as a PyTorch C++ extension
+and comparing its tensor output against a ground-truth tensor.
+"""
 
+import torch
 import tempfile
-import subprocess
 import os
 import shutil
-import uuid
-import textwrap
+from torch.utils.cpp_extension import load
+import logging
 
-def _normalize_output(s: str) -> str:
-    # Normalize whitespace/newlines for comparison. Adjust as needed.
-    return "\n".join(line.rstrip() for line in s.strip().splitlines())
-
-def _static_cuda_checks(code: str) -> str:
-    """Return non-empty message explaining what's missing or suspicious, or empty if looks okay."""
-    messages = []
-    lowered = code  # keep case for identifiers; CUDA keywords are lowercase anyway
-    if "__global__" not in lowered and "__device__" not in lowered and "__host__" not in lowered:
-        messages.append("No CUDA function qualifiers found (e.g. '__global__', '__device__', '__host__').")
-    if "<<<" not in lowered or ">>>" not in lowered:
-        messages.append("No kernel-launch syntax '<<<...>>>' detected.")
-    if "#include <cuda.h>" not in lowered and "#include <cuda_runtime.h>" not in lowered:
-        # not strictly necessary but helpful to warn
-        messages.append("No obvious CUDA runtime include (e.g. <cuda_runtime.h>).")
-    if "cudaMemcpy" not in lowered and "cudaMalloc" not in lowered and "cudaFree" not in lowered:
-        messages.append("No calls to cudaMalloc/cudaMemcpy/cudaFree detected. Maybe code is missing host-device data movement.")
-    # Provide very lightweight check for main
-    if "int main(" not in lowered and "void main(" not in lowered:
-        messages.append("No 'main' function detected; compilation may fail or the binary may do nothing.")
-    return "\n".join(messages)
-
-def verify_cuda(code: str, correct_output: str, timeout_seconds: int = 10) -> list[bool, str]:
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+def validate_kernel(
+    generated_cu_code: str,
+    generated_cpp_code: str,
+    input_tensor_path: str,
+    ground_truth_path: str,
+    timeout_seconds: int = 120
+) -> tuple[bool, bool, str]:
     """
-    Try to compile and run provided CUDA C/C++ source using nvcc (if available),
-    compare stdout to correct_output, and return (matches: bool, message: str).
-
-    - If nvcc is present: returns (True, "") when output matches exactly (after normalization),
-      otherwise (False, "<compiler/runtime/diff message>").
-    - If nvcc is NOT present: performs static checks and returns (False, "<advice>") unless
-      static checks are all OK, in which case returns (False, "<nvcc missing but code looks plausible>").
-
-    Note: exact string match is used after normalization. Adjust _normalize_output if you need fuzzy matching.
+    Validates a CUDA kernel using the PyTorch C++ extension API.
+    ...
     """
 
-    # Quick sanity
-    if not isinstance(correct_output, str):
-        return False, "Provided 'correct_output' is not a string."
+    tmpdir = tempfile.mkdtemp(prefix="gins_verifier_")
+    log_message = ""
 
-    # NVCC not installed
-    nvcc_path = shutil.which("nvcc")
-    if nvcc_path is None:
-        # Do static checks and return helpful info
-        static_msg = _static_cuda_checks(code)
-        if static_msg:
-            return False, "nvcc not found on PATH. Static analysis found potential issues:\n" + static_msg
-        else:
-            return False, "nvcc not found on PATH. Source looks plausible (no obvious issues), but I can't compile/run it here."
+    # --- FIX 1: Define all status variables at the top ---
+    call_success = False
+    exec_success = False
+    runtime_success = False # Add this for clarity
 
-    # NVCC is installed: compile & run
-    tmpdir = tempfile.mkdtemp(prefix="verify_cuda_")
     try:
-        src_path = os.path.join(tmpdir, f"prog_{uuid.uuid4().hex}.cu")
-        bin_path = os.path.join(tmpdir, "prog_exec")
-
-        # write source
-        with open(src_path, "w", encoding="utf-8") as f:
-            f.write(code)
-
-        # compile source code
-        compile_cmd = [nvcc_path, src_path, "-o", bin_path]
-        try:
-            compile_proc = subprocess.run(
-                compile_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=60
-            )
-        except subprocess.TimeoutExpired:
-            return False, "nvcc compilation timed out."
+        cu_path = os.path.join(tmpdir, "kernel.cu")
         
-        # compile failed
-        if compile_proc.returncode != 0:
-            # return compiler stderr for debugging
-            err = compile_proc.stderr.strip()
-            out = compile_proc.stdout.strip()
-            msg = "Compilation failed.\n"
-            if err:
-                msg += f"nvcc stderr:\n{err}\n"
-            if out:
-                msg += f"nvcc stdout:\n{out}\n"
-            return False, msg
+        # --- FIX 2: Save the wrapper as a .cu file, not .cpp ---
+        # This tells torch.utils.load() to use NVCC (the CUDA compiler)
+        wrapper_cu_path = os.path.join(tmpdir, "wrapper.cu") 
 
+        with open(cu_path, "w", encoding="utf-8") as f:
+            f.write(generated_cu_code)
         
-        # run the binary, capture stdout
-        exec_path = bin_path
+        with open(wrapper_cu_path, "w", encoding="utf-8") as f:
+            f.write(generated_cpp_code)
+
+        # --- 2. Stage 1: Call Status (Compilation) ---
+        log.info(f"Attempting JIT compilation in {tmpdir}...")
         try:
-            run_proc = subprocess.run(
-                [exec_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=timeout_seconds
+            module = load(
+                name=f"generated_module_{os.path.basename(tmpdir)}",
+                
+                # --- FIX 3: Pass BOTH .cu files to the loader ---
+                sources=[wrapper_cu_path, cu_path],
+                
+                build_directory=tmpdir,
+                verbose=True, 
             )
-        except subprocess.TimeoutExpired:
-            return False, f"Program execution timed out after {timeout_seconds} seconds."
+            call_success = True # <-- Compilation succeeded
+            log_message = "Compilation successful.\n"
+            log.info("Compilation successful.")
 
-        # If program returned non-zero, still capture stderr
-        stdout = run_proc.stdout or ""
-        stderr = run_proc.stderr or ""
-        if run_proc.returncode != 0:
-            msg = f"Program exited with return code {run_proc.returncode}.\n"
-            if stderr:
-                msg += f"stderr:\n{stderr}\n"
-            msg += f"stdout:\n{stdout}\n"
-            return False, msg
+        except Exception as e:
+            # --- FIX 4: Correctly handle compilation failure ---
+            call_success = False
+            exec_success = False
+            log_message = f"Compilation Failed (Call Status=False):\n{e}"
+            log.warning(log_message)
+            # Return here; no need to run exec status
+            return call_success, exec_success, log_message
+        
+        # --- 3. Stage 2: Execution Status (Correctness) ---
+        # This code only runs if call_success == True
+        log.info("Running execution status check...")
+        try:
+            # Load ground truth and inputs
+            inputs = torch.load(input_tensor_path)
+            ground_truth = torch.load(ground_truth_path).cuda()
+            
+            # Ensure inputs are on GPU
+            cuda_inputs = [t.cuda() for t in inputs]
+            
+            # Create an empty output tensor with the correct shape/type
+            output_generated = torch.empty_like(ground_truth)
+            
+            # Call the compiled kernel function
+            module.launch(*cuda_inputs, output_generated)
+            
+            # Kernel executed without a runtime error
+            runtime_success = True
 
-        # Compare outputs after normalization
-        got = _normalize_output(stdout)
-        want = _normalize_output(correct_output)
-        if got == want:
-            return True, ""
-        else:
-            # Provide helpful diff-like message (simple)
-            msg = "Output mismatch.\n--- got ---\n"
-            msg += got + "\n--- expected ---\n" + want + "\n"
-            if stderr:
-                msg += "\nProgram stderr:\n" + stderr
-            return False, msg
+        except Exception as e:
+            # --- FIX 5: Handle runtime (not compilation) errors ---
+            runtime_success = False
+            exec_success = False
+            log_message += f"Kernel Runtime Error (Exec Status=False):\n{e}"
+            log.warning(log_message)
+            # 'call_success' is still True, so we return it
+            return call_success, exec_success, log_message
+
+        # --- 4. Final Comparison ---
+        if runtime_success:
+            try:
+                # Use numerical tolerance checking
+                is_correct = torch.allclose(output_generated, ground_truth, atol=1e-2, rtol=1e-1)
+                
+                if is_correct:
+                    exec_success = True
+                    log_message += "Validation Successful (Exec Status=True): Outputs match."
+                    log.info("Validation Successful.")
+                else:
+                    exec_success = False
+                    diff = torch.abs(output_generated - ground_truth)
+                    log_message += (
+                        f"Correctness Mismatch (Exec Status=False):\n"
+                        f"Max difference: {diff.max().item()}\n"
+                        f"Mean difference: {diff.mean().item()}"
+                    )
+                    log.warning(log_message)
+
+            except Exception as e:
+                exec_success = False
+                log_message += f"Output Comparison Error (Exec Status=False):\n{e}"
+                log.warning(log_message)
+
+        # Final return
+        return call_success, exec_success, log_message
 
     finally:
-        # clean up temporary files; swallow exceptions
-        try:
-            for fname in os.listdir(tmpdir):
-                path = os.path.join(tmpdir, fname)
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-            os.rmdir(tmpdir)
-        except Exception:
-            pass
+        # Clean up the temporary directory
+        if os.path.exists(tmpdir):
+            try:
+                shutil.rmtree(tmpdir)
+                log.info(f"Cleaned up {tmpdir}")
+            except Exception as e:
+                log.error(f"Failed to clean up {tmpdir}: {e}")
