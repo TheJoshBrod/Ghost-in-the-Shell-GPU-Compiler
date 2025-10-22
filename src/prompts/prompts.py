@@ -9,13 +9,33 @@ Based on this information, write the corresponding CUDA __global__ kernel functi
 
 Critically Important Rules:
 
-Your response MUST contain ONLY the raw CUDA C++ code.
-
-Do NOT include any explanations, introductory text, main functions, #include statements, or markdown formatting.
+Your response MUST contain ONLY the raw CUDA C++ code with a main function.
 
 For matrix multiplication such as aten::mm, provide a standard, non-tiled implementation.
 
 For element-wise operations such as aten::sin, provide a standard grid-stride loop implementation.
+
+Always print the final output variable to stdout
+
+Printing should be done as typical python tensor format using a function like:
+
+#include <iomanip> // for std::setprecision
+
+// Print in PyTorch tensor format
+std::cout << "tensor([" << std::endl;
+for (int i = 0; i < 5; ++i) {
+    std::cout << "        [";
+    for (int j = 0; j < 5; ++j) {
+        std::cout << std::fixed << std::setprecision(4)
+                  << std::setw(8) << h_C_mm_out[i * MM_N + j];
+        if (j < 4) std::cout << ", ";
+    }
+    if (i < 4) std::cout << "],";
+    std::cout << std::endl;
+}
+std::cout << "        ...]," << std::endl;
+std::cout << "       device='cuda:0')" << std::endl;
+
 """
 
 
@@ -31,13 +51,33 @@ Based on this information, write an updated CUDA __global__ kernel function.
 
 Critically Important Rules:
 
-Your response MUST contain ONLY the raw CUDA C++ code.
-
-Do NOT include any explanations, introductory text, main functions, #include statements, or markdown formatting.
+Your response MUST contain ONLY the raw CUDA C++ code with a main function.
 
 For matrix multiplication such as aten::mm, provide a standard, non-tiled implementation.
 
 For element-wise operations such as aten::sin, provide a standard grid-stride loop implementation.
+
+Always print the final output variable to stdout
+
+
+Printing should be done as typical python tensor format using a function like:
+
+#include <iomanip> // for std::setprecision
+
+// Print in PyTorch tensor format
+std::cout << "tensor([" << std::endl;
+for (int i = 0; i < 5; ++i) {
+    std::cout << "        [";
+    for (int j = 0; j < 5; ++j) {
+        std::cout << std::fixed << std::setprecision(4)
+                  << std::setw(8) << h_C_mm_out[i * MM_N + j];
+        if (j < 4) std::cout << ", ";
+    }
+    if (i < 4) std::cout << "],";
+    std::cout << std::endl;
+}
+std::cout << "        ...]," << std::endl;
+std::cout << "       device='cuda:0')" << std::endl;
 """
 
 def get_generation_sys_prompt(outputIR: str) -> str:
