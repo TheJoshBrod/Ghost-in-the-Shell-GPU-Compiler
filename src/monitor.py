@@ -17,7 +17,7 @@ def handle_trace(prof):
 
     current_op = None
     for event in prof.events():
-        if event.self_device_time_total == 0:
+        if event.self_device_time_total == 0 and event.self_cpu_time_total == 0:
             continue  # skip events with no device time (profiler noise)
 
         if event.key.startswith("aten::"):
@@ -92,6 +92,7 @@ def profile_single_op(context: dict, full_exec_string: str) -> tuple[torch.Tenso
         record_shapes=True
     ) as p:
         for _ in range(3): # Total steps: wait + warmup + active
+            print(full_exec_string)
             exec(full_exec_string, temp_context)
             p.step()
 
@@ -102,5 +103,5 @@ def profile_single_op(context: dict, full_exec_string: str) -> tuple[torch.Tenso
 
     # 8. Format op_details string for the LLM
     op_details = f"aten output:\n{aten_output}\n\n\nkernel output:\n{kernel_output}"
-    
+    print(op_details)
     return ground_truth_tensor, op_details
