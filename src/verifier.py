@@ -42,8 +42,6 @@ def verify_cuda(code: str, correct_output: str, timeout_seconds: int = 10) -> li
     Note: exact string match is used after normalization. Adjust _normalize_output if you need fuzzy matching.
     """
 
-    # TODO: Go through all of this.
-
     # Quick sanity
     if not isinstance(correct_output, str):
         return False, "Provided 'correct_output' is not a string."
