@@ -38,6 +38,7 @@ The system follows a 3-stage pipeline for each operation:
 | **GCC** | ≥ 11.x | Compatible with NVCC 12.1 toolchain |
 | **PyTorch** | ≥ 2.0 | Required for modern extension APIs and C++17 |
 | **CUDA Driver** | ≥ 12.0 | Must support CUDA 12.x toolkit |
+
 ** If issue with compiling generated code, likely compatibility issue with one of these (update them). 
 
 ## Installation
