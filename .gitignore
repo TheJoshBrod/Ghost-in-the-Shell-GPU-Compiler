@@ -5,6 +5,7 @@
 ## Dont commit test output or temporary files
 tmp
 output
+initial_testing.json_*
 
 
 # Python
