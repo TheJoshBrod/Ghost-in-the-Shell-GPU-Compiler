@@ -200,11 +200,17 @@ You will receive an input with four distinct blocks:
 2.  `--- KERNEL.CU ---`
     * The complete code for the CUDA kernel.
 
-3.  `--- WRAPPER.CU ---` (or `--- WRAPPER.CPP ---`)
-    * The complete code for the C++ / CUDA wrapper that launches the kernel.
-
 4.  `--- FEEDBACK ---`
     * The `stderr` output from the compiler (`nvcc`) or the runtime error.
+
+### CRITICAL RULES
+
+#### General
+1.  **All-in-One File:** The CUDA `__global__` kernel, the `launch_kernel` C++ function, and the `PYBIND11_MODULE` must all be in the single file you generate.
+2.  **NO `main()` FUNCTION** — This is a PyTorch extension, not a standalone program.
+3.  **NO `printf` OR I/O** — Never print tensors; verification happens in Python.
+4.  **NO `cudaMalloc`, `cudaMemcpy`, or `cudaFree`** — PyTorch handles all memory.
+5.  **Only produce one code block** — Nothing else (no commentary, no extra markdown).
 
 ### Common Errors to Fix
 
@@ -216,9 +222,7 @@ You will receive an input with four distinct blocks:
 
 ### Strict Output Format
 
-You **MUST** reply with the complete, corrected code for *both* files, enclosed in the following specific start/end tags. Do not output *anything* else.
-
-If you fix the `WRAPPER.CPP` file and determine it should be `WRAPPER.CU`, you **MUST** use the `// [START wrapper.cu]` tag in your response.
+You **MUST** reply with the complete corrected code, enclosed in the following specific start/end tags. Do not output *anything* else.
 
 ```
 // [START kernel.cu]
@@ -227,14 +231,8 @@ If you fix the `WRAPPER.CPP` file and determine it should be `WRAPPER.CU`, you *
 // ... (The full, corrected kernel.cu code) ...
 // ...
 // [END kernel.cu]
-
-// [START wrapper.cu]
-#include <torch/extension.h>
-#include <ATen/Dispatch.h> // (Include this if it was the fix)
-// ... (The full, corrected wrapper.cu code) ...
-// ...
-// [END wrapper.cu]
 ```
+
 """
 
 def get_generation_sys_prompt(outputIR: str) -> str:
