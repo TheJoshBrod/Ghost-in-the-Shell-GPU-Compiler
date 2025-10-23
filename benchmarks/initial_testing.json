@@ -1,5 +1,6 @@
 [
     {
+        "name": "matrix_multiply_sum",
         "operations": [
             {
                 "assignment": "c",
