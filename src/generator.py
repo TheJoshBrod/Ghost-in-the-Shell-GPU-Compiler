@@ -1,6 +1,7 @@
 import re
 import ollama as ol
 import google.generativeai as genai
+from openai import OpenAI
 from src.prompts import prompts
 
 def cleanup_mkdown(input: str) -> str:
@@ -121,3 +122,60 @@ def gemini_fixer(cu_code: str, error: str, msg: str, model: str = "gemini-2.5-fl
     new_cu_code = cleanup_mkdown(response.text)
     
     return new_cu_code
+
+def chatgpt_generator(msg: str, model: str = "gpt-4o", outputIR: str = "CUDA") -> str:
+    """Initial generation of kernel/IR using OpenAI.
+
+    Returns:
+        str: kernel_code
+    """
+
+    client = OpenAI()
+        
+    print("Generating code...")
+    sys_prompt = prompts.get_generation_sys_prompt(outputIR)
+    
+    response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": msg}
+            ]
+        )
+
+    cu_code = cleanup_mkdown(response.choices[0].message.content)
+    
+    print("Code generated...")
+    return cu_code
+        
+
+def chatgpt_fixer(cu_code: str, error: str, msg: str, model: str = "gpt-4o", outputIR: str = "CUDA") -> str:
+    """Fixes the previously generated kernel using OpenAI.
+
+    Args:
+        cu_code (str): Previous version of the malformed/incorrect .cu kernel
+        error (str): Custom error message to inform what the LLM did wrong 
+        msg (str): Op details from initial run
+        model (str): OpenAI model
+        outputIR (str): what output we want
+
+    Returns:
+        str: new_kernel_code
+    """
+    client = OpenAI()
+        
+    sys_prompt = prompts.get_fixer_sys_prompt(outputIR)
+    prompt = prompts.generate_fixer_prompt(cu_code, error, msg)
+    
+    response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+    cu_code = cleanup_mkdown(response.choices[0].message.content)
+    
+    print("Code generated...")
+    return cu_code
