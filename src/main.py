@@ -18,12 +18,23 @@ import src.verifier
 
 # Configuration
 MAX_ATTEMPTS = 5
-OUTPUT_DIR = Path("generated_kernels")
+OUTPUT_BASE_DIR = Path("generated_kernels")
 
 
-def setup_output_directory():
-    """Create output directory for logs and generated kernels."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
+def setup_operation_directory(benchmark_name: str, op_name: str) -> Path:
+    """
+    Create nested output directory for a specific operation.
+    
+    Args:
+        benchmark_name: Name of the benchmark
+        op_name: Name of the operation/test
+        
+    Returns:
+        Path to the operation directory
+    """
+    op_dir = OUTPUT_BASE_DIR / benchmark_name / op_name
+    op_dir.mkdir(parents=True, exist_ok=True)
+    return op_dir
 
 
 def initialize_context(definitions: list[dict]) -> dict:
@@ -44,15 +55,15 @@ def initialize_context(definitions: list[dict]) -> dict:
 
 def save_tensors(input_tensors: list[torch.Tensor], 
                  ground_truth: torch.Tensor, 
-                 op_id: str) -> tuple[str, str]:
+                 op_dir: Path) -> tuple[str, str]:
     """
     Save input and ground truth tensors to disk.
     
     Returns:
         Tuple of (input_path, ground_truth_path)
     """
-    input_path = OUTPUT_DIR / f"{op_id}_inputs.pt"
-    gold_path = OUTPUT_DIR / f"{op_id}_gold.pt"
+    input_path = op_dir / "inputs.pt"
+    gold_path = op_dir / "gold.pt"
     
     torch.save(input_tensors, input_path)
     torch.save(ground_truth, gold_path)
@@ -60,27 +71,38 @@ def save_tensors(input_tensors: list[torch.Tensor],
     return str(input_path), str(gold_path)
 
 
-def log_attempt(op_id: str, iteration: int, cu_code: str, feedback: str):
+def log_attempt(op_dir: Path, iteration: int, cu_code: str, feedback: str):
     """Log kernel code and feedback for a validation attempt."""
-    log_path = OUTPUT_DIR / f"{op_id}_iter{iteration}.log"
-    with open(log_path, "w") as f:
-        f.write(f"--- FEEDBACK ---\n{feedback}\n\n")
-        f.write(f"--- KERNEL.CU ---\n{cu_code}\n\n")
+    feedback_path = op_dir / f"feedback_{iteration}.md"
+    with open(feedback_path, "w") as f:
+        f.write(f"# Feedback - Iteration {iteration}\n\n")
+        f.write(feedback)
 
 
-def save_final_kernel(op_id: str, cu_code: str, success: bool):
-    """Save the final kernel code (successful or failed)."""
-    suffix = "_kernel_final.cu" if success else "_kernel_final_FAILED.cu"
-    final_path = OUTPUT_DIR / f"{op_id}{suffix}"
-    with open(final_path, "w") as f:
+def save_kernel_iteration(op_dir: Path, iteration: int, cu_code: str):
+    """Save kernel code for a specific iteration."""
+    kernel_path = op_dir / f"kernel_iter{iteration}.cu"
+    with open(kernel_path, "w") as f:
         f.write(cu_code)
+
+
+def save_final_kernel(op_dir: Path, cu_code: str, success: bool):
+    """Save the final kernel code."""
+    kernel_path = op_dir / "kernel.cu"
+    with open(kernel_path, "w") as f:
+        f.write(cu_code)
+    
+    # Also save a status file
+    status_path = op_dir / "status.txt"
+    with open(status_path, "w") as f:
+        f.write("SUCCESS" if success else "FAILED")
 
 
 def validate_with_retries(cu_code: str, 
                          input_path: str, 
                          gold_path: str,
                          op_details: dict,
-                         op_id: str,
+                         op_dir: Path,
                          op_index: int) -> tuple[bool, str]:
     """
     Attempt to validate and fix kernel code up to MAX_ATTEMPTS times.
@@ -99,7 +121,8 @@ def validate_with_retries(cu_code: str,
         )
         
         # Log the attempt
-        log_attempt(op_id, attempt, current_code, feedback)
+        log_attempt(op_dir, attempt, current_code, feedback)
+        save_kernel_iteration(op_dir, attempt, current_code)
         
         is_valid = call_success and exec_success
         
@@ -111,7 +134,7 @@ def validate_with_retries(cu_code: str,
         if attempt < MAX_ATTEMPTS - 1:
             print("✗ Validation FAILED. Attempting to fix...")
             try:
-                current_code = src.generator.gemini_fixer(
+                current_code = src.generator.chatgpt_fixer(
                     cu_code=current_code,
                     error=feedback,
                     msg=op_details   
@@ -130,7 +153,8 @@ def validate_with_retries(cu_code: str,
 def process_operation(op: dict, 
                      op_index: int, 
                      context: dict, 
-                     benchmark_id: str) -> bool:
+                     benchmark_name: str,
+                     test_name: str) -> bool:
     """
     Process a single operation: profile, generate, validate.
     
@@ -150,9 +174,16 @@ def process_operation(op: dict,
     op_call_str = f"{op_name}({', '.join(input_names)})"
     full_exec_string = f"{assignment_name} = {op_call_str}"
     
+    # Use test name as operation directory name
+    op_dir_name = test_name
+    
     print(f"\n{'='*60}")
     print(f"Processing Op {op_index + 1}: {full_exec_string}")
     print(f"{'='*60}")
+    
+    # Setup directory for this operation
+    op_dir = setup_operation_directory(benchmark_name, op_dir_name)
+    print(f"Output directory: {op_dir}")
     
     # Get input tensors from context
     try:
@@ -171,24 +202,23 @@ def process_operation(op: dict,
         return False
     
     # Save tensors for verification
-    op_id = f"{benchmark_id}_op{op_index}"
-    input_path, gold_path = save_tensors(input_tensors, ground_truth, op_id)
+    input_path, gold_path = save_tensors(input_tensors, ground_truth, op_dir)
     
     # Generate initial kernel
     print("Generating initial kernel code...")
     try:
-        cu_code = src.generator.gemini_generator(op_details)
+        cu_code = src.generator.chatgpt_generator(op_details)
     except Exception as e:
         print(f"✗ Initial generation failed: {e}")
         return False
     
     # Validation loop with retries
     is_valid, final_code = validate_with_retries(
-        cu_code, input_path, gold_path, op_details, op_id, op_index
+        cu_code, input_path, gold_path, op_details, op_dir, op_index
     )
     
     # Save final kernel
-    save_final_kernel(op_id, final_code, is_valid)
+    save_final_kernel(op_dir, final_code, is_valid)
     
     # Execute operation to update context for next op
     print(f"Executing '{full_exec_string}' to update context.")
@@ -202,11 +232,12 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
     Process all operations in a benchmark program.
     
     Args:
-        program: Dict containing 'definitions' and 'operations'
+        program: Dict containing 'name', 'definitions' and 'operations'
         benchmark_counter: Index of this benchmark
         benchmark_name: Name of the benchmark file
     """
-    benchmark_id = f"{benchmark_name}_{benchmark_counter}"
+    # Get test name from program
+    test_name = program.get("name", f"test{benchmark_counter}")
     
     # Initialize execution context
     context = initialize_context(program["definitions"])
@@ -214,7 +245,7 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
     # Process each operation
     operations = program["operations"]
     for op_index, op in enumerate(operations):
-        process_operation(op, op_index, context, benchmark_id)
+        process_operation(op, op_index, context, benchmark_name, test_name)
 
 
 def load_benchmarks(benchmark_path: str) -> tuple[list[dict], str]:
@@ -237,8 +268,6 @@ def main():
         print("Usage: python main.py <benchmark_file.json>")
         sys.exit(1)
     
-    setup_output_directory()
-    
     benchmark_file = sys.argv[1]
     benchmarks, benchmark_name = load_benchmarks(benchmark_file)
     
@@ -255,7 +284,7 @@ def main():
     
     print(f"\n{'='*60}")
     print("✓ All benchmarks processed!")
-    print(f"Results saved to: {OUTPUT_DIR}")
+    print(f"Results saved to: {OUTPUT_BASE_DIR}")
     print(f"{'='*60}\n")
 
 
