@@ -8,6 +8,7 @@ import torch
 import tempfile
 import os
 import shutil
+import time
 from torch.utils.cpp_extension import load
 import logging
 
@@ -20,10 +21,18 @@ def validate_kernel(
     input_tensor_path: str,
     ground_truth_path: str,
     timeout_seconds: int = 120
-) -> tuple[bool, bool, str]:
+) -> tuple[bool, bool, str, dict]:
     """
     Validates a single-file CUDA kernel using the PyTorch C++ extension API.
-    ...
+    
+    Returns:
+        tuple: (call_success, exec_success, log_message, metrics)
+            metrics dict contains: {
+                'execution_time_ms': float,
+                'memory_allocated_mb': float,
+                'memory_reserved_mb': float,
+                'peak_memory_mb': float
+            }
     """
 
     tmpdir = tempfile.mkdtemp(prefix="gins_verifier_")
@@ -31,7 +40,15 @@ def validate_kernel(
 
     call_success = False
     exec_success = False
-    runtime_success = False # Add this for clarity
+    runtime_success = False
+    
+    # Initialize metrics dictionary
+    metrics = {
+        'execution_time_ms': None,
+        'memory_allocated_mb': None,
+        'memory_reserved_mb': None,
+        'peak_memory_mb': None
+    }
 
     try:
         # --- 1. Stage 1: Write Code to File ---
@@ -49,7 +66,7 @@ def validate_kernel(
                 build_directory=tmpdir,
                 verbose=True, 
             )
-            call_success = True # <-- Compilation succeeded
+            call_success = True
             log_message = "Compilation successful.\n"
             log.info("Compilation successful.")
 
@@ -59,11 +76,9 @@ def validate_kernel(
             exec_success = False
             log_message = f"Compilation Failed (Call Status=False):\n{e}"
             log.warning(log_message)
-            # Return here; no need to run exec status
-            return call_success, exec_success, log_message
+            return call_success, exec_success, log_message, metrics
         
         # --- 3. Stage 2: Execution Status (Correctness) ---
-        # This code only runs if call_success == True
         log.info("Running execution status check...")
         try:
             # Load ground truth and inputs
@@ -73,8 +88,44 @@ def validate_kernel(
             # Ensure inputs are on GPU
             cuda_inputs = [t.cuda() for t in inputs]
             
-            # Call the compiled kernel (it returns the output tensor)
+            # Reset peak memory stats before kernel execution
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+            
+            # Record memory before execution
+            mem_before = torch.cuda.memory_allocated()
+            
+            # Time the kernel execution
+            start_time = time.perf_counter()
+            
+            # Call the compiled kernel
             output_generated = module.launch(*cuda_inputs)
+            
+            # Ensure all CUDA operations complete
+            torch.cuda.synchronize()
+            
+            end_time = time.perf_counter()
+            
+            # Record memory after execution
+            mem_after = torch.cuda.memory_allocated()
+            peak_mem = torch.cuda.max_memory_allocated()
+            reserved_mem = torch.cuda.memory_reserved()
+            
+            # Calculate metrics
+            execution_time_ms = (end_time - start_time) * 1000
+            memory_allocated_mb = (mem_after - mem_before) / (1024 ** 2)
+            memory_reserved_mb = reserved_mem / (1024 ** 2)
+            peak_memory_mb = peak_mem / (1024 ** 2)
+            
+            # Store metrics
+            metrics['execution_time_ms'] = execution_time_ms
+            metrics['memory_allocated_mb'] = memory_allocated_mb
+            metrics['memory_reserved_mb'] = memory_reserved_mb
+            metrics['peak_memory_mb'] = peak_memory_mb
+            
+            log.info(f"Execution time: {execution_time_ms:.3f} ms")
+            log.info(f"Memory allocated: {memory_allocated_mb:.3f} MB")
+            log.info(f"Peak memory: {peak_memory_mb:.3f} MB")
             
             # Move to same device as ground truth if needed
             if not output_generated.is_cuda:
@@ -84,13 +135,12 @@ def validate_kernel(
             runtime_success = True
 
         except Exception as e:
-            # --- Handle runtime (not compilation) errors ---
+            # --- Handle runtime errors ---
             runtime_success = False
             exec_success = False
             log_message += f"Kernel Runtime Error (Exec Status=False):\n{e}"
             log.warning(log_message)
-            # 'call_success' is still True, so we return it
-            return call_success, exec_success, log_message
+            return call_success, exec_success, log_message, metrics
 
         # --- 4. Final Comparison ---
         if runtime_success:
@@ -100,7 +150,12 @@ def validate_kernel(
                 
                 if is_correct:
                     exec_success = True
-                    log_message += "Validation Successful (Exec Status=True): Outputs match."
+                    log_message += (
+                        f"Validation Successful (Exec Status=True): Outputs match.\n"
+                        f"Execution time: {metrics['execution_time_ms']:.3f} ms\n"
+                        f"Memory allocated: {metrics['memory_allocated_mb']:.3f} MB\n"
+                        f"Peak memory: {metrics['peak_memory_mb']:.3f} MB"
+                    )
                     log.info("Validation Successful.")
                 else:
                     exec_success = False
@@ -108,7 +163,9 @@ def validate_kernel(
                     log_message += (
                         f"Correctness Mismatch (Exec Status=False):\n"
                         f"Max difference: {diff.max().item()}\n"
-                        f"Mean difference: {diff.mean().item()}"
+                        f"Mean difference: {diff.mean().item()}\n"
+                        f"Execution time: {metrics['execution_time_ms']:.3f} ms\n"
+                        f"Memory allocated: {metrics['memory_allocated_mb']:.3f} MB"
                     )
                     log.warning(log_message)
 
@@ -117,9 +174,8 @@ def validate_kernel(
                 log_message += f"Output Comparison Error (Exec Status=False):\n{e}"
                 log.warning(log_message)
 
-
         # Final return
-        return call_success, exec_success, log_message
+        return call_success, exec_success, log_message, metrics
 
     finally:
         # Clean up the temporary directory

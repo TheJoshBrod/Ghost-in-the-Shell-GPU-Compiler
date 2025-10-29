@@ -108,21 +108,23 @@ def validate_with_retries(cu_code: str,
                          gold_path: str,
                          op_details: dict,
                          op_dir: Path,
-                         op_index: int) -> tuple[bool, str, int]:
+                         op_index: int) -> tuple[bool, str, int, dict]:
     """
     Attempt to validate and fix kernel code up to MAX_ATTEMPTS times.
     
     Returns:
-        Tuple of (is_valid, final_cu_code, attempts_until_success)
+        Tuple of (is_valid, final_cu_code, attempts_until_success, metrics)
         attempts_until_success is -1 if failed
+        metrics is the dict from the successful validation or empty dict if failed
     """
     current_code = cu_code
+    final_metrics = {}
     
     for attempt in range(MAX_ATTEMPTS):
         print(f"--- Attempt {attempt + 1}/{MAX_ATTEMPTS} for Op {op_index} ---")
         
         # Validate current kernel
-        call_success, exec_success, feedback = src.verifier.validate_kernel(
+        call_success, exec_success, feedback, metrics = src.verifier.validate_kernel(
             current_code, input_path, gold_path
         )
         
@@ -134,7 +136,8 @@ def validate_with_retries(cu_code: str,
         
         if is_valid:
             print(f"✓ Validation SUCCESSFUL for Op {op_index} on attempt {attempt + 1}!")
-            return True, current_code, attempt + 1
+            final_metrics = metrics
+            return True, current_code, attempt + 1, final_metrics
         
         # Try to fix if not the last attempt
         if attempt < MAX_ATTEMPTS - 1:
@@ -153,7 +156,7 @@ def validate_with_retries(cu_code: str,
                 break
     
     print(f"✗ Failed to generate correct kernel for Op {op_index} after {MAX_ATTEMPTS} attempts.")
-    return False, current_code, -1
+    return False, current_code, -1, final_metrics
 
 
 def process_operation(op: dict, 
@@ -219,20 +222,24 @@ def process_operation(op: dict,
         return False
     
     # Validation loop with retries
-    is_valid, final_code, attempts = validate_with_retries(
+    is_valid, final_code, attempts, metrics = validate_with_retries(
         cu_code, input_path, gold_path, op_details, op_dir, op_index
     )
     
     # Save final kernel
     save_final_kernel(op_dir, final_code, is_valid)
     
-    # Record statistics
+    # Record statistics with metrics
     global benchmark_stats
     benchmark_stats.append({
         'test_name': test_name,
         'operation': op_name,
         'success': is_valid,
-        'attempts': attempts
+        'attempts': attempts,
+        'execution_time_ms': metrics.get('execution_time_ms'),
+        'memory_allocated_mb': metrics.get('memory_allocated_mb'),
+        'memory_reserved_mb': metrics.get('memory_reserved_mb'),
+        'peak_memory_mb': metrics.get('peak_memory_mb')
     })
 
     # Execute operation to update context for next op
@@ -267,6 +274,7 @@ def save_statistics_csv(benchmark_name: str):
     """
     Save benchmark statistics to a CSV file.
     Includes median and mean attempts for successful runs, and total success rate.
+    Also includes performance metrics (time and memory).
     """
     if not benchmark_stats:
         print("No statistics to save.")
@@ -283,9 +291,21 @@ def save_statistics_csv(benchmark_name: str):
         attempts_list = [s['attempts'] for s in successful_runs]
         median_attempts = median(attempts_list)
         mean_attempts = mean(attempts_list)
+        
+        # Calculate mean performance metrics for successful runs
+        exec_times = [s['execution_time_ms'] for s in successful_runs if s['execution_time_ms'] is not None]
+        mem_alloc = [s['memory_allocated_mb'] for s in successful_runs if s['memory_allocated_mb'] is not None]
+        peak_mem = [s['peak_memory_mb'] for s in successful_runs if s['peak_memory_mb'] is not None]
+        
+        mean_exec_time = mean(exec_times) if exec_times else 0
+        mean_mem_alloc = mean(mem_alloc) if mem_alloc else 0
+        mean_peak_mem = mean(peak_mem) if peak_mem else 0
     else:
         median_attempts = 0
         mean_attempts = 0
+        mean_exec_time = 0
+        mean_mem_alloc = 0
+        mean_peak_mem = 0
     
     # Save summary CSV
     summary_path = OUTPUT_BASE_DIR / benchmark_name / "summary_statistics.csv"
@@ -299,6 +319,9 @@ def save_statistics_csv(benchmark_name: str):
         writer.writerow(['Success Rate (%)', f'{success_rate:.2f}'])
         writer.writerow(['Median Attempts (Success Only)', f'{median_attempts:.2f}'])
         writer.writerow(['Mean Attempts (Success Only)', f'{mean_attempts:.2f}'])
+        writer.writerow(['Mean Execution Time (ms)', f'{mean_exec_time:.3f}'])
+        writer.writerow(['Mean Memory Allocated (MB)', f'{mean_mem_alloc:.3f}'])
+        writer.writerow(['Mean Peak Memory (MB)', f'{mean_peak_mem:.3f}'])
     
     print(f"\n{'='*60}")
     print("Summary Statistics:")
@@ -307,6 +330,9 @@ def save_statistics_csv(benchmark_name: str):
     print(f"  Success Rate: {success_rate:.2f}%")
     print(f"  Median Attempts (successful): {median_attempts:.2f}")
     print(f"  Mean Attempts (successful): {mean_attempts:.2f}")
+    print(f"  Mean Execution Time: {mean_exec_time:.3f} ms")
+    print(f"  Mean Memory Allocated: {mean_mem_alloc:.3f} MB")
+    print(f"  Mean Peak Memory: {mean_peak_mem:.3f} MB")
     print(f"  Saved to: {summary_path}")
     print(f"{'='*60}\n")
     
@@ -314,14 +340,32 @@ def save_statistics_csv(benchmark_name: str):
     detail_path = OUTPUT_BASE_DIR / benchmark_name / "detailed_statistics.csv"
     with open(detail_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Test Name', 'Operation', 'Success', 'Attempts'])
+        writer.writerow([
+            'Test Name', 
+            'Operation', 
+            'Success', 
+            'Attempts',
+            'Execution Time (ms)',
+            'Memory Allocated (MB)',
+            'Memory Reserved (MB)',
+            'Peak Memory (MB)'
+        ])
         for stat in benchmark_stats:
             attempts_str = str(stat['attempts']) if stat['attempts'] != -1 else 'Failed'
+            exec_time = f"{stat['execution_time_ms']:.3f}" if stat['execution_time_ms'] is not None else 'N/A'
+            mem_alloc = f"{stat['memory_allocated_mb']:.3f}" if stat['memory_allocated_mb'] is not None else 'N/A'
+            mem_reserved = f"{stat['memory_reserved_mb']:.3f}" if stat['memory_reserved_mb'] is not None else 'N/A'
+            peak_mem = f"{stat['peak_memory_mb']:.3f}" if stat['peak_memory_mb'] is not None else 'N/A'
+            
             writer.writerow([
                 stat['test_name'],
                 stat['operation'],
                 'Yes' if stat['success'] else 'No',
-                attempts_str
+                attempts_str,
+                exec_time,
+                mem_alloc,
+                mem_reserved,
+                peak_mem
             ])
     
     print(f"Detailed statistics saved to: {detail_path}\n")
