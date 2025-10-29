@@ -1,6 +1,10 @@
-torch==2.8.0
 regex==2025.9.18
-ollama==0.6.0
-ninja==1.13.0
+
+torch==2.8.0
 numpy==2.3.4
+
 google-generativeai==0.8.5
+openai==2.6.0
+ollama==0.6.0
+
+ninja==1.13.0
