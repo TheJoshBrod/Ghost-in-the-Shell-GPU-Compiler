@@ -10,7 +10,9 @@ Walks through each operation in a benchmark to:
 import sys
 import json
 import torch
+import csv
 from pathlib import Path
+from statistics import mean, median
 
 import src.monitor
 import src.generator
@@ -19,6 +21,9 @@ import src.verifier
 # Configuration
 MAX_ATTEMPTS = 5
 OUTPUT_BASE_DIR = Path("generated_kernels")
+
+# Global statistics tracking
+benchmark_stats = []
 
 
 def setup_operation_directory(benchmark_name: str, op_name: str) -> Path:
@@ -103,12 +108,13 @@ def validate_with_retries(cu_code: str,
                          gold_path: str,
                          op_details: dict,
                          op_dir: Path,
-                         op_index: int) -> tuple[bool, str]:
+                         op_index: int) -> tuple[bool, str, int]:
     """
     Attempt to validate and fix kernel code up to MAX_ATTEMPTS times.
     
     Returns:
-        Tuple of (is_valid, final_cu_code)
+        Tuple of (is_valid, final_cu_code, attempts_until_success)
+        attempts_until_success is -1 if failed
     """
     current_code = cu_code
     
@@ -128,7 +134,7 @@ def validate_with_retries(cu_code: str,
         
         if is_valid:
             print(f"✓ Validation SUCCESSFUL for Op {op_index} on attempt {attempt + 1}!")
-            return True, current_code
+            return True, current_code, attempt + 1
         
         # Try to fix if not the last attempt
         if attempt < MAX_ATTEMPTS - 1:
@@ -147,7 +153,7 @@ def validate_with_retries(cu_code: str,
                 break
     
     print(f"✗ Failed to generate correct kernel for Op {op_index} after {MAX_ATTEMPTS} attempts.")
-    return False, current_code
+    return False, current_code, -1
 
 
 def process_operation(op: dict, 
@@ -213,13 +219,22 @@ def process_operation(op: dict,
         return False
     
     # Validation loop with retries
-    is_valid, final_code = validate_with_retries(
+    is_valid, final_code, attempts = validate_with_retries(
         cu_code, input_path, gold_path, op_details, op_dir, op_index
     )
     
     # Save final kernel
     save_final_kernel(op_dir, final_code, is_valid)
     
+    # Record statistics
+    global benchmark_stats
+    benchmark_stats.append({
+        'test_name': test_name,
+        'operation': op_name,
+        'success': is_valid,
+        'attempts': attempts
+    })
+
     # Execute operation to update context for next op
     print(f"Executing '{full_exec_string}' to update context.")
     exec(full_exec_string, context)
@@ -246,6 +261,70 @@ def process_benchmark(program: dict, benchmark_counter: int, benchmark_name: str
     operations = program["operations"]
     for op_index, op in enumerate(operations):
         process_operation(op, op_index, context, benchmark_name, test_name)
+
+
+def save_statistics_csv(benchmark_name: str):
+    """
+    Save benchmark statistics to a CSV file.
+    Includes median and mean attempts for successful runs, and total success rate.
+    """
+    if not benchmark_stats:
+        print("No statistics to save.")
+        return
+    
+    # Calculate metrics
+    successful_runs = [s for s in benchmark_stats if s['success']]
+    total_runs = len(benchmark_stats)
+    success_count = len(successful_runs)
+    success_rate = (success_count / total_runs * 100) if total_runs > 0 else 0
+    
+    # Calculate median and mean attempts for successful runs only
+    if successful_runs:
+        attempts_list = [s['attempts'] for s in successful_runs]
+        median_attempts = median(attempts_list)
+        mean_attempts = mean(attempts_list)
+    else:
+        median_attempts = 0
+        mean_attempts = 0
+    
+    # Save summary CSV
+    summary_path = OUTPUT_BASE_DIR / benchmark_name / "summary_statistics.csv"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(summary_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Operations', total_runs])
+        writer.writerow(['Successful Operations', success_count])
+        writer.writerow(['Success Rate (%)', f'{success_rate:.2f}'])
+        writer.writerow(['Median Attempts (Success Only)', f'{median_attempts:.2f}'])
+        writer.writerow(['Mean Attempts (Success Only)', f'{mean_attempts:.2f}'])
+    
+    print(f"\n{'='*60}")
+    print("Summary Statistics:")
+    print(f"  Total Operations: {total_runs}")
+    print(f"  Successful: {success_count}")
+    print(f"  Success Rate: {success_rate:.2f}%")
+    print(f"  Median Attempts (successful): {median_attempts:.2f}")
+    print(f"  Mean Attempts (successful): {mean_attempts:.2f}")
+    print(f"  Saved to: {summary_path}")
+    print(f"{'='*60}\n")
+    
+    # Save detailed CSV with per-operation stats
+    detail_path = OUTPUT_BASE_DIR / benchmark_name / "detailed_statistics.csv"
+    with open(detail_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Test Name', 'Operation', 'Success', 'Attempts'])
+        for stat in benchmark_stats:
+            attempts_str = str(stat['attempts']) if stat['attempts'] != -1 else 'Failed'
+            writer.writerow([
+                stat['test_name'],
+                stat['operation'],
+                'Yes' if stat['success'] else 'No',
+                attempts_str
+            ])
+    
+    print(f"Detailed statistics saved to: {detail_path}\n")
 
 
 def load_benchmarks(benchmark_path: str) -> tuple[list[dict], str]:
@@ -286,6 +365,9 @@ def main():
     print("✓ All benchmarks processed!")
     print(f"Results saved to: {OUTPUT_BASE_DIR}")
     print(f"{'='*60}\n")
+    
+    # Save statistics CSV
+    save_statistics_csv(benchmark_name)
 
 
 if __name__ == "__main__":
