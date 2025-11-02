@@ -35,6 +35,7 @@ If the block is missing or incomplete, the build script will fail.
 // [START kernel.cu]
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <string>
 
 // CUDA kernel code goes here (device code only)
 
@@ -59,9 +60,28 @@ __global__ void mm_kernel(const T* A, const T* B, T* C, int64_t M, int64_t K, in
 
 #### 2. C++ Wrapper (`launch_kernel`) Requirements
 * Place AFTER the torch/extension.h include
-* Accept `torch::Tensor` inputs and RETURN `torch::Tensor` output.
-* Verify inputs are CUDA tensors with `TORCH_CHECK(tensor.is_cuda(), "...")`.
-* Make input tensors contiguous (`A = A.contiguous();`).
+* The wrapper function must RETURN a torch::Tensor
+* The function can accept a mix of argument types:
+    - torch::Tensor arguments (for tensors).
+    - Scalar arguments like int64_t, double, bool, or std::string. Pybind11 will automatically handle the conversion from Python types.
+* CRITICAL: You must apply checks only to the torch::Tensor arguments (e.g., TORCH_CHECK(A.is_cuda(), "..."), A = A.contiguous();). Do not apply these checks to scalar arguments.
+* **Example Mixed-Argument Signature:**
+  ```C++
+  // A wrapper for an op taking two tensors, an integer padding, and a string mode
+  torch::Tensor launch_my_op(
+      torch::Tensor A, 
+      torch::Tensor B, 
+      int64_t padding_size, 
+      std::string mode
+  ) {
+      // Checks only for tensors:
+      TORCH_CHECK(A.is_cuda(), "A must be CUDA");
+      TORCH_CHECK(B.is_cuda(), "B must be CUDA");
+
+      // No checks needed for other args such as padding_size, mode, etc.
+      // ... rest of logic ...
+  }
+  ```
 * Get dimensions using `int64_t M = A.size(0);`.
 * Compute grid/block sizes (256 threads per block is standard).
 * Use **manual type dispatch** with if-else checking `A.scalar_type()`:
@@ -77,8 +97,10 @@ __global__ void mm_kernel(const T* A, const T* B, T* C, int64_t M, int64_t K, in
 
 #### 3. Pybind11 Binding (`PYBIND11_MODULE`) Requirements
 ```C++
+// This binding works for any launch function signature.
+// Pybind11 automatically detects all arguments (Tensor, int, string, etc.)
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("launch", &launch_function_name, "Description");
+    m.def("launch", &launch_function_name, "Description");
 }
 ```
 
@@ -162,7 +184,7 @@ torch::Tensor launch_mm(torch::Tensor A, torch::Tensor B) {
 
 // Pybind11 binding
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("launch", &launch_mm, "Matrix multiplication kernel");
+    m.def("launch", &launch_function_name, "Description");
 }
 // [END kernel.cu]
 ```

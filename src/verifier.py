@@ -85,8 +85,29 @@ def validate_kernel(
             inputs = torch.load(input_tensor_path)
             ground_truth = torch.load(ground_truth_path).cuda()
             
-            # Ensure inputs are on GPU
-            cuda_inputs = [t.cuda() for t in inputs]
+            # Prepare inputs: move tensors to CUDA, keep scalars as-is
+            if isinstance(inputs, (list, tuple)):
+                cuda_inputs = []
+                for item in inputs:
+                    if torch.is_tensor(item):
+                        cuda_inputs.append(item.cuda())
+                    elif isinstance(item, (int, float, bool, str)):
+                        # Keep scalar types as-is
+                        cuda_inputs.append(item)
+                        log.info(f"Passing non-tensor argument: {type(item).__name__} = {item}")
+                    else:
+                        log.warning(f"Skipping unsupported input type: {type(item)}")
+            elif torch.is_tensor(inputs):
+                cuda_inputs = [inputs.cuda()]
+            else:
+                # Single scalar input
+                if isinstance(inputs, (int, float, bool, str)):
+                    cuda_inputs = [inputs]
+                else:
+                    exec_success = False
+                    log_message += "No valid inputs found (Exec Status=False)"
+                    log.warning(log_message)
+                    return call_success, exec_success, log_message, metrics
             
             # Reset peak memory stats before kernel execution
             torch.cuda.reset_peak_memory_stats()
