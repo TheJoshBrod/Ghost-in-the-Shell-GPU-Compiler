@@ -143,7 +143,7 @@ def validate_with_retries(cu_code: str,
         if attempt < MAX_ATTEMPTS - 1:
             print("✗ Validation FAILED. Attempting to fix...")
             try:
-                current_code = src.generator.chatgpt_fixer(
+                current_code = src.generator.gemini_fixer(
                     cu_code=current_code,
                     error=feedback,
                     msg=op_details   
@@ -216,7 +216,7 @@ def process_operation(op: dict,
     # Generate initial kernel
     print("Generating initial kernel code...")
     try:
-        cu_code = src.generator.chatgpt_generator(op_details)
+        cu_code = src.generator.gemini_generator(op_details)
     except Exception as e:
         print(f"✗ Initial generation failed: {e}")
         return False

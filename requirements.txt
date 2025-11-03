@@ -1,10 +1,12 @@
-regex==2025.9.18
+regex
 
-torch==2.8.0
-numpy==2.3.4
+torch
+numpy
+protobuf==5.26.1
+grpcio-status==1.59.0
+grpcio==1.59.0
+google-generativeai
+# openai==2.3.0
+ollama
 
-google-generativeai==0.8.5
-openai==2.6.0
-ollama==0.6.0
-
-ninja==1.13.0
+ninja

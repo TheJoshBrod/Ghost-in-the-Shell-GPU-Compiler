@@ -1,7 +1,7 @@
 import re
 import ollama as ol
 import google.generativeai as genai
-from openai import OpenAI
+#from openai import OpenAI
 from src.prompts import prompts
 
 def cleanup_mkdown(input: str) -> str:

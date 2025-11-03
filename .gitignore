@@ -9,6 +9,7 @@ generated_kernels/*
 !generated_kernels/.gitkeep
 
 # Python
+Python-3.12-5/*
 *.pyc
 __pycache__/
 *.egg-info*
