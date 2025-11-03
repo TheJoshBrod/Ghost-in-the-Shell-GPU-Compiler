@@ -5,8 +5,6 @@
 ## Dont commit test output or temporary files
 tmp
 output
-generated_kernels/*
-!generated_kernels/.gitkeep
 
 # Python
 Python-3.12-5/*
