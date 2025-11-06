@@ -5,12 +5,21 @@
             {
                 "assignment": "output",
                 "operation": "torch.add",
-                "inputs": ["a", "b"]
+                "inputs": [
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "b", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -19,12 +28,21 @@
             {
                 "assignment": "output",
                 "operation": "torch.mul",
-                "inputs": ["a", "b"]
+                "inputs": [
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "b", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -33,12 +51,21 @@
             {
                 "assignment": "output",
                 "operation": "torch.sub",
-                "inputs": ["a", "b"]
+                "inputs": [
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "b", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -47,12 +74,21 @@
             {
                 "assignment": "output",
                 "operation": "torch.div",
-                "inputs": ["a", "b"]
+                "inputs": [
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "b", "value": "torch.rand(512, 512, device=\"cuda\") + 0.1"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.rand(512, 512, device='cuda') + 0.1"
+            }
         ]
     },
     {
@@ -61,12 +97,21 @@
             {
                 "assignment": "output",
                 "operation": "torch.pow",
-                "inputs": ["a", "b"]
+                "inputs": [
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.rand(512, 512, device=\"cuda\") + 0.1"},
-            {"variable": "b", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.rand(512, 512, device='cuda') + 0.1"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -75,11 +120,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.neg",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -88,11 +138,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.abs",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -101,11 +156,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.exp",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -114,11 +174,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.log",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.rand(512, 512, device=\"cuda\") + 0.001"}
+            {
+                "variable": "a",
+                "value": "torch.rand(512, 512, device='cuda') + 0.001"
+            }
         ]
     },
     {
@@ -127,11 +192,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.sqrt",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.rand(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.rand(512, 512, device='cuda') + 0.001"
+            }
         ]
     },
     {
@@ -140,11 +210,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.rsqrt",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.rand(512, 512, device=\"cuda\") + 0.001"}
+            {
+                "variable": "a",
+                "value": "torch.rand(512, 512, device='cuda') + 0.001"
+            }
         ]
     },
     {
@@ -153,11 +228,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.reciprocal",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\") + 0.1"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda') + 0.1"
+            }
         ]
     },
     {
@@ -166,11 +246,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.round",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -179,11 +264,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.floor",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -192,11 +282,16 @@
             {
                 "assignment": "output",
                 "operation": "torch.ceil",
-                "inputs": ["a"]
+                "inputs": [
+                    "a"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -205,13 +300,26 @@
             {
                 "assignment": "output",
                 "operation": "torch.clamp",
-                "inputs": ["a", "min_val", "max_val"]
+                "inputs": [
+                    "a",
+                    "min_val",
+                    "max_val"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "min_val", "value": "-0.5"},
-            {"variable": "max_val", "value": "0.5"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "min_val",
+                "value": "-0.5"
+            },
+            {
+                "variable": "max_val",
+                "value": "0.5"
+            }
         ]
     },
     {
@@ -220,12 +328,21 @@
             {
                 "assignment": "output",
                 "operation": "torch.maximum",
-                "inputs": ["a", "b"]
+                "inputs": [
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "b", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -234,12 +351,21 @@
             {
                 "assignment": "output",
                 "operation": "torch.minimum",
-                "inputs": ["a", "b"]
+                "inputs": [
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "b", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     },
     {
@@ -248,13 +374,26 @@
             {
                 "assignment": "output",
                 "operation": "torch.where",
-                "inputs": ["cond", "a", "b"]
+                "inputs": [
+                    "cond",
+                    "a",
+                    "b"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "cond", "value": "torch.rand(512, 512, device=\"cuda\") > 0.5"},
-            {"variable": "a", "value": "torch.randn(512, 512, device=\"cuda\")"},
-            {"variable": "b", "value": "torch.randn(512, 512, device=\"cuda\")"}
+            {
+                "variable": "cond",
+                "value": "torch.rand(512, 512, device='cuda') > 0.5"
+            },
+            {
+                "variable": "a",
+                "value": "torch.randn(512, 512, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(512, 512, device='cuda')"
+            }
         ]
     }
 ]

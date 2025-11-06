@@ -5,14 +5,32 @@
             {
                 "assignment": "output",
                 "operation": "torch.nn.functional.conv1d",
-                "inputs": ["x", "w", "b", "one", "one"]
+                "inputs": [
+                    "x",
+                    "w",
+                    "b",
+                    "one",
+                    "one"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "x", "value": "torch.randn(8, 3, 128, device='cuda')"},
-            {"variable": "w", "value": "torch.randn(16, 3, 5, device='cuda')"},
-            {"variable": "b", "value": "torch.randn(16, device='cuda')"},
-            {"variable": "one", "value": "int('1')"}
+            {
+                "variable": "x",
+                "value": "torch.randn(8, 3, 128, device='cuda')"
+            },
+            {
+                "variable": "w",
+                "value": "torch.randn(16, 3, 5, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(16, device='cuda')"
+            },
+            {
+                "variable": "one",
+                "value": "int('1')"
+            }
         ]
     },
     {
@@ -21,14 +39,32 @@
             {
                 "assignment": "output",
                 "operation": "torch.nn.functional.conv2d",
-                "inputs": ["x", "w", "b", "one", "one"]
+                "inputs": [
+                    "x",
+                    "w",
+                    "b",
+                    "one",
+                    "one"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "x", "value": "torch.randn(8, 3, 64, 64, device='cuda')"},
-            {"variable": "w", "value": "torch.randn(16, 3, 3, 3, device='cuda')"},
-            {"variable": "b", "value": "torch.randn(16, device='cuda')"},
-            {"variable": "one", "value": "int('1')"}
+            {
+                "variable": "x",
+                "value": "torch.randn(8, 3, 64, 64, device='cuda')"
+            },
+            {
+                "variable": "w",
+                "value": "torch.randn(16, 3, 3, 3, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(16, device='cuda')"
+            },
+            {
+                "variable": "one",
+                "value": "int('1')"
+            }
         ]
     },
     {
@@ -37,14 +73,32 @@
             {
                 "assignment": "output",
                 "operation": "torch.nn.functional.conv3d",
-                "inputs": ["x", "w", "b", "one", "one"]
+                "inputs": [
+                    "x",
+                    "w",
+                    "b",
+                    "one",
+                    "one"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "x", "value": "torch.randn(4, 3, 16, 32, 32, device='cuda')"},
-            {"variable": "w", "value": "torch.randn(8, 3, 3, 3, 3, device='cuda')"},
-            {"variable": "b", "value": "torch.randn(8, device='cuda')"},
-            {"variable": "one", "value": "int('1')"}
+            {
+                "variable": "x",
+                "value": "torch.randn(4, 3, 16, 32, 32, device='cuda')"
+            },
+            {
+                "variable": "w",
+                "value": "torch.randn(8, 3, 3, 3, 3, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(8, device='cuda')"
+            },
+            {
+                "variable": "one",
+                "value": "int('1')"
+            }
         ]
     },
     {
@@ -53,15 +107,36 @@
             {
                 "assignment": "output",
                 "operation": "torch.nn.functional.conv_transpose2d",
-                "inputs": ["x", "w", "b", "two", "one"]
+                "inputs": [
+                    "x",
+                    "w",
+                    "b",
+                    "two",
+                    "one"
+                ]
             }
         ],
         "definitions": [
-            {"variable": "x", "value": "torch.randn(8, 16, 32, 32, device='cuda')"},
-            {"variable": "w", "value": "torch.randn(16, 8, 3, 3, device='cuda')"},
-            {"variable": "b", "value": "torch.randn(8, device='cuda')"},
-            {"variable": "one", "value": "int('1')"},
-            {"variable": "two", "value": "int('2')"}
+            {
+                "variable": "x",
+                "value": "torch.randn(8, 16, 32, 32, device='cuda')"
+            },
+            {
+                "variable": "w",
+                "value": "torch.randn(16, 8, 3, 3, device='cuda')"
+            },
+            {
+                "variable": "b",
+                "value": "torch.randn(8, device='cuda')"
+            },
+            {
+                "variable": "one",
+                "value": "int('1')"
+            },
+            {
+                "variable": "two",
+                "value": "int('2')"
+            }
         ]
     }
 ]
