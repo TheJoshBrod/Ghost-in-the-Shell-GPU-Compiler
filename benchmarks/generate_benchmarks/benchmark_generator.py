@@ -16,7 +16,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 calls = {}
 _wrapped = set()
 ENABLE_WRAPPING = True
-MAX_CALLS_PER_FUNC = 4
+MAX_CALLS_PER_FUNC = 1e10
 def wrap_function(module, func_name):
     if not ENABLE_WRAPPING:
         return      
@@ -35,8 +35,9 @@ def wrap_function(module, func_name):
             return func(*args, **kwargs)
 
         # Convert arguments to JSON-serializable format
-        arg_repr = [str(arg.tolist()) if isinstance(arg, torch.Tensor) else arg for arg in args]
-        kwarg_repr = {k: (str(v.tolist()) if isinstance(v, torch.Tensor) else v) for k, v in kwargs.items()}
+        arg_repr = [arg.detach().cpu() if isinstance(arg, torch.Tensor) else arg for arg in args]
+        kwarg_repr = {k: (v.detach().cpu() if isinstance(v, torch.Tensor) else v) for k, v in kwargs.items()}
+
 
         # Store in calls dictionary
         key = f"{module_path}.{func_name}"
@@ -51,12 +52,11 @@ def wrap_function(module, func_name):
 
         # Convert output to JSON-serializable format
         if isinstance(output, torch.Tensor):
-            output_repr = str(output.tolist())
+            output_repr = output.detach().cpu()
         elif isinstance(output, (list, tuple)):
-            output_repr = [str(o.tolist()) if isinstance(o, torch.Tensor) else o for o in output]
+            output_repr = [o.detach().cpu() if isinstance(o, torch.Tensor) else o for o in output]
         else:
-            output_repr = str(output)
-
+            output_repr = output
 
         # Append args, kwargs, and output to tracker
         calls[key].append({"args": arg_repr, "kwargs": kwarg_repr, "output": output_repr})
@@ -96,6 +96,6 @@ print(prof.key_averages().table(sort_by="count", row_limit=50))
 #  Export PyTorch API In/Out 
 # ****************************
 
-print(f"benchmarks/generate_benchmarks/{model.__class__.__name__}")
-with open(f"output.json", "w") as f:
-    json.dump(calls, f, indent=2)
+print("Saving....")
+torch.save(calls, f"benchmarks/generate_benchmarks/{model.__class__.__name__}.pt")
+print("Saved to output.pt")
