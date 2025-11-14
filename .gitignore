@@ -5,6 +5,7 @@
 ## Dont commit test output or temporary files
 tmp
 output
+*.pt
 
 # Python
 Python-3.12.5/*
