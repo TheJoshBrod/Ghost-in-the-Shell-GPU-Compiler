@@ -1,14 +1,21 @@
 import torch
 import torch.autograd.profiler as profiler
 import torch.nn.functional as F
-import json
 from functools import wraps
+import inspect
 
 # from benchmarks.generate_benchmarks.trivial import SimpleModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+SKIP_FUNCTIONS = [
+    "has_torch_function",
+    "handle_torch_function",
+    "is_storage",
+    "result_type",
+    "get_default_dtype",
+]
 
 # ****************************
 # Track specific PyTorch Calls
@@ -16,50 +23,56 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 calls = {}
 _wrapped = set()
 ENABLE_WRAPPING = True
-MAX_CALLS_PER_FUNC = 1e10
+
 def wrap_function(module, func_name):
     if not ENABLE_WRAPPING:
-        return      
+        return
     func = getattr(module, func_name)
     if func in _wrapped:
         return
     _wrapped.add(func)
 
     module_path = module.__name__
+    
+    # Get function signature to extract default values
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):
+        sig = None
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # Only track first n times
         key = f"{module_path}.{func_name}"
-        if len(calls.get(key, [])) >= MAX_CALLS_PER_FUNC:
-            return func(*args, **kwargs)
 
-        # Convert arguments to JSON-serializable format
-        arg_repr = [arg.detach().cpu() if isinstance(arg, torch.Tensor) else arg for arg in args]
-        kwarg_repr = {k: (v.detach().cpu() if isinstance(v, torch.Tensor) else v) for k, v in kwargs.items()}
+        # Convert args to CPU tensors (lossless)
+        ser_args = [
+            a.detach().cpu() if isinstance(a, torch.Tensor) else a
+            for a in args
+        ]
 
+        # Only record kwargs explicitly passed
+        ser_kwargs = {
+            k: (v.detach().cpu() if isinstance(v, torch.Tensor) else v)
+            for k, v in kwargs.items()
+        }
 
-        # Store in calls dictionary
-        key = f"{module_path}.{func_name}"
-        if key not in calls:
-            calls[key] = []
-
-        # # Optional print for live feedback
-        # print(f"[CALL] {key} args={arg_repr} kwargs={kwarg_repr}")
-
-        # Call the original function
         output = func(*args, **kwargs)
 
-        # Convert output to JSON-serializable format
         if isinstance(output, torch.Tensor):
-            output_repr = output.detach().cpu()
+            ser_output = output.detach().cpu()
         elif isinstance(output, (list, tuple)):
-            output_repr = [o.detach().cpu() if isinstance(o, torch.Tensor) else o for o in output]
+            ser_output = [
+                o.detach().cpu() if isinstance(o, torch.Tensor) else o
+                for o in output
+            ]
         else:
-            output_repr = output
+            ser_output = output
 
-        # Append args, kwargs, and output to tracker
-        calls[key].append({"args": arg_repr, "kwargs": kwarg_repr, "output": output_repr})
+        calls.setdefault(key, []).append({
+            "args": ser_args,
+            "kwargs": ser_kwargs,
+            "output": ser_output
+        })
 
         return output
 
@@ -67,7 +80,12 @@ def wrap_function(module, func_name):
 
 # Wrap all functions in torch.nn.functional
 for name in dir(F):
-    if callable(getattr(F, name)):
+    if name.startswith("_"):
+        continue  # skip private names like _in_projection, etc.
+    if any(skip in name for skip in ["torch_function", "storage", "result_type", "dtype"]):
+        continue  # skip helpers by substring match
+    obj = getattr(F, name)
+    if callable(obj):
         wrap_function(F, name)
 
 
