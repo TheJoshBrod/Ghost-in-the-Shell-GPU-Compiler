@@ -97,6 +97,16 @@ calls: dict[str, list[dict[str, Any]]] = {}
 _wrapped: set[Any] = set()
 ENABLE_WRAPPING = True
 skipped_counts: dict[str, int] = {}
+TENSOR_IADD_FUNCTION_NAME = "torch.tensor.iadd"
+_ORIGINAL_TENSOR_IADD = None
+_TENSOR_IADD_SIGNATURE = {
+    "params": ["input", "other"],
+    "defaults": {},
+    "kinds": {
+        "input": inspect.Parameter.POSITIONAL_OR_KEYWORD.name,
+        "other": inspect.Parameter.POSITIONAL_OR_KEYWORD.name,
+    },
+}
 
 
 def _serialize(v):
@@ -302,8 +312,13 @@ def wrap_function(module, func_name: str) -> None:
             skipped_counts[key] = skipped_counts.get(key, 0) + 1
             return output
 
+        entries = calls.setdefault(key, [])
+        max_per_op = _profile_max_per_op()
+        if len(entries) >= max_per_op:
+            skipped_counts[f"{key}:profile_max_per_op"] = skipped_counts.get(f"{key}:profile_max_per_op", 0) + 1
+            return output
+
         ser_output = _serialize(output)
-        calls.setdefault(key, [])
 
         # Try to resolve full parameter set including defaults.
         # _func_sig is always a real inspect.Signature when set, so bind() +
@@ -313,7 +328,7 @@ def wrap_function(module, func_name: str) -> None:
                 bound = _func_sig.bind(*args, **kwargs)
                 bound.apply_defaults()
                 resolved_kwargs = {k: _serialize(v) for k, v in bound.arguments.items()}
-                calls[key].append({
+                entries.append({
                     "function_name": key,
                     "args": [],
                     "kwargs": resolved_kwargs,
@@ -325,7 +340,7 @@ def wrap_function(module, func_name: str) -> None:
                 pass  # bind failed — fall through to original
 
         # Original recording path (fallback)
-        calls[key].append({
+        entries.append({
             "function_name": key,
             "args": [_serialize(a) for a in args],
             "kwargs": {k: _serialize(v) for k, v in kwargs.items()},
@@ -348,6 +363,62 @@ def wrap_torch_nn_functional() -> None:
         if (getattr(obj, "__module__", "") or "") not in _COMPUTE_MODULES:
             continue
         wrap_function(F, name)
+
+
+def _clone_for_profile(value):
+    if torch.is_tensor(value):
+        return value.detach().clone()
+    return value
+
+
+def wrap_tensor_iadd() -> None:
+    global _ORIGINAL_TENSOR_IADD
+    if not ENABLE_WRAPPING or _ORIGINAL_TENSOR_IADD is not None:
+        return
+
+    original = torch.Tensor.__iadd__
+    _ORIGINAL_TENSOR_IADD = original
+
+    def wrapper(self, other):
+        lhs_before = None
+        other_before = None
+        if not _should_skip(TENSOR_IADD_FUNCTION_NAME):
+            entries = calls.setdefault(TENSOR_IADD_FUNCTION_NAME, [])
+            max_per_op = _profile_max_per_op()
+            if len(entries) < max_per_op:
+                lhs_before = _clone_for_profile(self)
+                other_before = _clone_for_profile(other)
+
+        output = original(self, other)
+
+        if _should_skip(TENSOR_IADD_FUNCTION_NAME):
+            skipped_counts[TENSOR_IADD_FUNCTION_NAME] = skipped_counts.get(TENSOR_IADD_FUNCTION_NAME, 0) + 1
+            return output
+
+        entries = calls.setdefault(TENSOR_IADD_FUNCTION_NAME, [])
+        max_per_op = _profile_max_per_op()
+        if len(entries) >= max_per_op:
+            key = f"{TENSOR_IADD_FUNCTION_NAME}:profile_max_per_op"
+            skipped_counts[key] = skipped_counts.get(key, 0) + 1
+            return output
+
+        if lhs_before is None:
+            lhs_before = _clone_for_profile(self)
+        if other_before is None:
+            other_before = _clone_for_profile(other)
+        entries.append({
+            "function_name": TENSOR_IADD_FUNCTION_NAME,
+            "args": [],
+            "kwargs": {
+                "input": _serialize(lhs_before),
+                "other": _serialize(other_before),
+            },
+            "output": _serialize(output),
+            "signature": _TENSOR_IADD_SIGNATURE,
+        })
+        return output
+
+    torch.Tensor.__iadd__ = wrapper
 
 
 def save_entries(func_name: str, entries: list[dict[str, Any]], base_dir: str, max_per_op: int = 200) -> None:
@@ -696,6 +767,7 @@ def main() -> int:
     config = load_project_config(project_dir)
     _load_profile_filters(config)
     wrap_torch_nn_functional()
+    wrap_tensor_iadd()
 
     module = import_model_module(model_path)
     model = load_model(module, weights_path, device)

@@ -195,6 +195,8 @@ def _load_entry_file(pt: Path) -> tuple[str, Any, dict[str, Any]] | None:
 
 
 def _get_pytorch_func(op_name: str):
+    if op_name == "torch_tensor_iadd":
+        return torch.add
     if op_name.startswith("torch_nn_functional_"):
         fn_name = op_name.replace("torch_nn_functional_", "", 1)
         if hasattr(F, fn_name):

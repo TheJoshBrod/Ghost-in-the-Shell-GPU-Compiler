@@ -163,8 +163,10 @@ def compile_kernel(kernel_cu_path: str, op_name: str, build_dir: str, opt_level:
 
 _PATCH_STATE = threading.local()
 _ORIGINAL_FUNCTIONALS: dict[str, Callable[..., Any]] = {}
+_TENSOR_IADD_PATCH_KEY = "torch.Tensor.__iadd__"
+_ORIGINAL_TENSOR_IADD: Callable[..., Any] | None = None
 _ATEN_FALLBACK_CALL_RE = re.compile(
-    r"\bat::(?:adaptive_avg_pool\d*d|batch_norm|conv\d*d|linear|max_pool\d*d|relu)\s*\("
+    r"\bat::(?:adaptive_avg_pool\d*d|add|batch_norm|conv\d*d|linear|max_pool\d*d|relu)\s*\("
 )
 _KNOWN_FAST_OPS = {
     "torch_nn_functional_linear",
@@ -328,6 +330,28 @@ def _ensure_functional_dispatch(fn_attr: str) -> Callable[..., Any] | None:
     return original
 
 
+def _ensure_tensor_iadd_dispatch() -> Callable[..., Any]:
+    import torch
+
+    global _ORIGINAL_TENSOR_IADD
+    if _ORIGINAL_TENSOR_IADD is not None:
+        return _ORIGINAL_TENSOR_IADD
+
+    original = torch.Tensor.__iadd__
+    _ORIGINAL_TENSOR_IADD = original
+
+    def dispatched(self, other):
+        stack = getattr(_PATCH_STATE, "stack", None)
+        if stack:
+            patch = stack[-1].get(_TENSOR_IADD_PATCH_KEY)
+            if patch is not None:
+                return patch(self, other)
+        return original(self, other)
+
+    torch.Tensor.__iadd__ = dispatched
+    return original
+
+
 def _launch_arity(kernel_cu: str, ext: Any) -> int | None:
     n_launch = None
     if os.path.exists(kernel_cu):
@@ -387,6 +411,67 @@ def _kernel_policy_skip_reason(op_name: str, kernel_cu: str, kernel_policy: str)
     raise ValueError(f"Unknown kernel policy: {kernel_policy}")
 
 
+def _symmetric_int(value: Any, *, default: int | None = None) -> int | Any:
+    if value is None:
+        return default
+    if isinstance(value, (tuple, list)):
+        if len(value) == 1:
+            return int(value[0])
+        if len(value) == 2 and int(value[0]) == int(value[1]):
+            return int(value[0])
+        return value
+    return int(value)
+
+
+def _resolve_max_pool2d_launch_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    names = [
+        "input",
+        "kernel_size",
+        "stride",
+        "padding",
+        "dilation",
+        "ceil_mode",
+        "return_indices",
+    ]
+    resolved = {name: args[index] for index, name in enumerate(names) if index < len(args)}
+    resolved.update(kwargs)
+    if "input" not in resolved or "kernel_size" not in resolved:
+        return {"fallback_reason": "max_pool2d_missing_required_args"}
+
+    kernel_size = _symmetric_int(resolved.get("kernel_size"))
+    stride = _symmetric_int(resolved.get("stride"), default=None)
+    if stride is None:
+        stride = kernel_size
+    padding = _symmetric_int(resolved.get("padding", 0), default=0)
+    dilation = _symmetric_int(resolved.get("dilation", 1), default=1)
+    ceil_mode = bool(resolved.get("ceil_mode", False))
+    return_indices = bool(resolved.get("return_indices", False))
+
+    scalar_fields = {
+        "kernel_size": kernel_size,
+        "stride": stride,
+        "padding": padding,
+        "dilation": dilation,
+    }
+    non_scalar = [name for name, value in scalar_fields.items() if not isinstance(value, int)]
+    if non_scalar:
+        return {"fallback_reason": "max_pool2d_asymmetric_args:" + ",".join(non_scalar)}
+    if return_indices:
+        return {"fallback_reason": "max_pool2d_return_indices_unsupported"}
+
+    return {
+        "ordered": [
+            resolved["input"],
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            ceil_mode,
+            return_indices,
+        ],
+    }
+
+
 def _complete_functional_launch_args(
     *,
     op_name: str,
@@ -437,7 +522,17 @@ def _build_functional_patch(
         _increment_stat(runtime_stats, "patched_calls")
         _increment_stat(op_stats, "patched_calls")
         try:
-            if orig_params is not None:
+            if op_name == "torch_nn_functional_max_pool2d":
+                max_pool_resolved = _resolve_max_pool2d_launch_args(args, kwargs)
+                fallback_reason = max_pool_resolved.get("fallback_reason")
+                if fallback_reason:
+                    _record_fallback(runtime_stats, op_name, str(fallback_reason))
+                    return orig_fn(*args, **kwargs)
+                ordered = list(max_pool_resolved["ordered"])
+                resolved = {}
+                _increment_stat(runtime_stats, "adaptation_count")
+                _increment_stat(op_stats, "adaptation_count")
+            elif orig_params is not None:
                 resolved = {orig_params[i]: value for i, value in enumerate(args) if i < len(orig_params)}
                 resolved.update(kwargs)
                 ordered = [resolved.get(name) for name in orig_params]
@@ -850,6 +945,34 @@ def load_cast(
                 op_report["skip_reason"] = f"jit_failed: {type(exc).__name__}: {exc}"
                 runtime_report["op_reports"].append(op_report)
                 continue
+
+        if op_name == "torch_tensor_iadd":
+            original = _ensure_tensor_iadd_dispatch()
+            n_launch = _launch_arity(kernel_cu, ext)
+            functional_patches[_TENSOR_IADD_PATCH_KEY] = _build_functional_patch(
+                op_name=op_name,
+                ext=ext,
+                orig_fn=original,
+                n_launch=n_launch,
+                orig_params=["input", "other"],
+                runtime_stats=runtime_stats if record_runtime_stats else None,
+            )
+            op_report["patch_registered"] = True
+            runtime_report["selected_ops"].append(op_name)
+            runtime_report["loaded_kernels"].append(
+                {
+                    "op_name": op_name,
+                    "fn_attr": _TENSOR_IADD_PATCH_KEY,
+                    "load_mode": op_report["load_mode"],
+                    "kernel_source_path": kernel_cu,
+                    "kernel_source_hash": op_report["kernel_source_hash"],
+                    "precompiled_binary_path": op_report["precompiled_binary_path"],
+                    "precompiled_binary_hash": op_report["precompiled_binary_hash"],
+                }
+            )
+            runtime_report["op_reports"].append(op_report)
+            print(f"  Registered runtime patch torch.Tensor.__iadd__ → {op_name}")
+            continue
 
         # Generic patch: decode torch.nn.functional.<attr> from the op_name convention.
         if not op_name.startswith(_F_PREFIX):

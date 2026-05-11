@@ -206,6 +206,12 @@ def _load_op_counts(io_dir: Path) -> dict:
     return {_normalize_op_name(k): int(v) for k, v in counts.items()}
 
 
+def _monitor_exec_for_function(function_name: str) -> str:
+    if function_name == "torch.tensor.iadd":
+        return "torch.add(*args, **kwargs)"
+    return f"{function_name}(*args, **kwargs)"
+
+
 def _write_failure_report(
     op_dir: Path,
     stage: str,
@@ -619,7 +625,7 @@ def process_function(
         "kwargs": first_kwargs,
     }
     print(function_name)
-    exec_str = f"{function_name}(*args, **kwargs)"
+    exec_str = _monitor_exec_for_function(function_name)
 
     # Set up GenModel
     sys_prompt = prompts.get_system_prompt()
