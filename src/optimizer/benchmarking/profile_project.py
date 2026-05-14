@@ -314,7 +314,7 @@ def wrap_function(module, func_name: str) -> None:
 
         entries = calls.setdefault(key, [])
         max_per_op = _profile_max_per_op()
-        if len(entries) >= max_per_op:
+        if _profile_limit_reached(len(entries), max_per_op):
             skipped_counts[f"{key}:profile_max_per_op"] = skipped_counts.get(f"{key}:profile_max_per_op", 0) + 1
             return output
 
@@ -385,7 +385,7 @@ def wrap_tensor_iadd() -> None:
         if not _should_skip(TENSOR_IADD_FUNCTION_NAME):
             entries = calls.setdefault(TENSOR_IADD_FUNCTION_NAME, [])
             max_per_op = _profile_max_per_op()
-            if len(entries) < max_per_op:
+            if not _profile_limit_reached(len(entries), max_per_op):
                 lhs_before = _clone_for_profile(self)
                 other_before = _clone_for_profile(other)
 
@@ -397,7 +397,7 @@ def wrap_tensor_iadd() -> None:
 
         entries = calls.setdefault(TENSOR_IADD_FUNCTION_NAME, [])
         max_per_op = _profile_max_per_op()
-        if len(entries) >= max_per_op:
+        if _profile_limit_reached(len(entries), max_per_op):
             key = f"{TENSOR_IADD_FUNCTION_NAME}:profile_max_per_op"
             skipped_counts[key] = skipped_counts.get(key, 0) + 1
             return output
@@ -421,7 +421,23 @@ def wrap_tensor_iadd() -> None:
     torch.Tensor.__iadd__ = wrapper
 
 
-def save_entries(func_name: str, entries: list[dict[str, Any]], base_dir: str, max_per_op: int = 200) -> None:
+_PROFILE_MAX_ALL_VALUES = {"0", "all", "none", "unlimited"}
+
+
+def _profile_limit_reached(count: int, max_per_op: int | None) -> bool:
+    return max_per_op is not None and count >= max_per_op
+
+
+def _format_profile_max_per_op(max_per_op: int | None) -> int | str:
+    return "all" if max_per_op is None else max_per_op
+
+
+def save_entries(
+    func_name: str,
+    entries: list[dict[str, Any]],
+    base_dir: str,
+    max_per_op: int | None = 200,
+) -> None:
     func_dir = os.path.join(base_dir, func_name.replace(".", "_").replace("/", "_"))
     os.makedirs(func_dir, exist_ok=True)
 
@@ -432,17 +448,17 @@ def save_entries(func_name: str, entries: list[dict[str, Any]], base_dir: str, m
             if n.startswith("entry_") and n.endswith(".pt")
         ]
     )
-    if existing_count >= max_per_op:
+    if _profile_limit_reached(existing_count, max_per_op):
         return
 
     for idx, entry in enumerate(entries):
-        if existing_count + idx >= max_per_op:
+        if _profile_limit_reached(existing_count + idx, max_per_op):
             return
         file_path = os.path.join(func_dir, f"entry_{existing_count + idx:06d}.pt")
         torch.save(entry, file_path)
 
 
-def flush_calls(base_dir: str, max_per_op: int = 200) -> dict[str, int]:
+def flush_calls(base_dir: str, max_per_op: int | None = 200) -> dict[str, int]:
     op_counts: dict[str, int] = {}
     for func_name, entries in calls.items():
         save_entries(func_name, entries, base_dir, max_per_op=max_per_op)
@@ -451,14 +467,18 @@ def flush_calls(base_dir: str, max_per_op: int = 200) -> dict[str, int]:
     return op_counts
 
 
-def _profile_max_per_op() -> int:
+def _profile_max_per_op() -> int | None:
     raw = os.environ.get("KFORGE_PROFILE_MAX_PER_OP", "").strip()
     if not raw:
         return 200
+    if raw.lower() in _PROFILE_MAX_ALL_VALUES:
+        return None
     try:
         parsed = int(raw)
     except ValueError:
         return 200
+    if parsed <= 0:
+        return None
     return max(parsed, 1)
 
 
@@ -828,6 +848,7 @@ def main() -> int:
     summary = {
         "project": project_dir.name,
         "device": device,
+        "profile_max_per_op": _format_profile_max_per_op(max_per_op),
         "op_counts": op_totals,
         "op_profile_ms": op_profile_ms,
         "skipped_counts": skipped_counts,

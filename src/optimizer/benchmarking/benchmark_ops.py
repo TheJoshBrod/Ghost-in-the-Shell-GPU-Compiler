@@ -27,6 +27,8 @@ from .harness import (
 from .paths import find_latest_optimized_dir, project_dir_for_name
 from .state import read_json_file, write_json_file
 
+_MAX_ENTRIES_ALL_VALUES = {"0", "all", "none", "unlimited"}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -126,7 +128,24 @@ def _entry_signature_from_files(entry_files: list[Path]) -> str:
         loaded = _load_entry_file(pt)
         if loaded is not None:
             entries.append(loaded)
-    return _entry_signature(entries)
+    file_fingerprint = []
+    for pt in entry_files:
+        try:
+            stat = pt.stat()
+            file_fingerprint.append({"name": pt.name, "size": int(stat.st_size)})
+        except OSError:
+            file_fingerprint.append({"name": pt.name, "size": None})
+    file_digest = hashlib.sha256(
+        json.dumps(file_fingerprint, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return json.dumps(
+        {
+            "count": len(entry_files),
+            "files_sha256": file_digest,
+            "sample": _entry_signature(entries),
+        },
+        sort_keys=True,
+    )
 
 
 def _runtime_fingerprint(device: str) -> str:
@@ -164,7 +183,26 @@ def _ops_from_csv(raw: str) -> list[str]:
     return out
 
 
-def _load_entries(io_dir: Path, max_entries: int) -> list[tuple[str, Any, dict[str, Any]]]:
+def _parse_max_entries(raw: str) -> int | None:
+    value = str(raw).strip().lower()
+    if value in _MAX_ENTRIES_ALL_VALUES:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--max-entries must be a positive integer or 'all'"
+        ) from exc
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _format_max_entries(max_entries: int | None) -> int | str:
+    return "all" if max_entries is None else max_entries
+
+
+def _load_entries(io_dir: Path, max_entries: int | None) -> list[tuple[str, Any, dict[str, Any]]]:
     entries: list[tuple[str, Any, dict[str, Any]]] = []
     for pt in _selected_entry_files(io_dir, max_entries):
         loaded = _load_entry_file(pt)
@@ -173,10 +211,13 @@ def _load_entries(io_dir: Path, max_entries: int) -> list[tuple[str, Any, dict[s
     return entries
 
 
-def _selected_entry_files(io_dir: Path | None, max_entries: int) -> list[Path]:
+def _selected_entry_files(io_dir: Path | None, max_entries: int | None) -> list[Path]:
     if io_dir is None:
         return []
-    return sorted(io_dir.glob("entry_*.pt"))[:max_entries]
+    entry_files = sorted(io_dir.glob("entry_*.pt"))
+    if max_entries is None:
+        return entry_files
+    return entry_files[:max_entries]
 
 
 def _load_entry_file(pt: Path) -> tuple[str, Any, dict[str, Any]] | None:
@@ -620,7 +661,7 @@ def _load_op_counts(summary_path: Path) -> dict[str, int]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
-    parser.add_argument("--max-entries", type=int, default=50)
+    parser.add_argument("--max-entries", type=_parse_max_entries, default=50)
     parser.add_argument("--ops", default="")
     args = parser.parse_args()
     _ensure_process_bin_on_path()
@@ -642,6 +683,7 @@ def main() -> int:
                     "project": args.project,
                     "timestamp": _now_iso(),
                     "status": "empty",
+                    "benchmark_max_entries": _format_max_entries(args.max_entries),
                     "results": [],
                     "errors": ["No profiling entries or summary found under io/"],
                 },
@@ -721,6 +763,7 @@ def main() -> int:
                     "timestamp": _now_iso(),
                     "status": "empty",
                     "device": device,
+                    "benchmark_max_entries": _format_max_entries(args.max_entries),
                     "runtime_fingerprint": json.loads(runtime_fingerprint),
                     "optimized_dir": str(optimized_root) if optimized_root else "",
                     "results": [results_by_op[k] for k in sorted(results_by_op.keys())],
@@ -736,6 +779,7 @@ def main() -> int:
                 "timestamp": _now_iso(),
                 "status": status,
                 "device": device,
+                "benchmark_max_entries": _format_max_entries(args.max_entries),
                 "benchmark_protocol": {
                     "warmup_runs": DEFAULT_WARMUP_RUNS,
                     "timed_runs": DEFAULT_TIMED_RUNS,
