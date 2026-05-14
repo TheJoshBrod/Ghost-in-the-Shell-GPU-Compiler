@@ -658,6 +658,93 @@ def _load_op_counts(summary_path: Path) -> dict[str, int]:
     return result
 
 
+def _load_unique_case_profiles(summary_path: Path) -> dict[str, dict[str, Any]]:
+    unique_path = summary_path.parent / "unique_cases.json"
+    if not unique_path.exists():
+        return {}
+    try:
+        data = json.loads(unique_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    raw_ops = data.get("ops") if isinstance(data, dict) else None
+    if not isinstance(raw_ops, dict):
+        return {}
+
+    profiles: dict[str, dict[str, Any]] = {}
+    for function_name, info in raw_ops.items():
+        if not isinstance(info, dict):
+            continue
+        op_dir = str(info.get("op_dir") or _normalize_op_dir_name(str(function_name)))
+        counts_by_entry: dict[str, int] = {}
+        case_keys_by_entry: dict[str, str] = {}
+        cases = info.get("cases")
+        if isinstance(cases, list):
+            for case in cases:
+                if not isinstance(case, dict):
+                    continue
+                entry_file = str(case.get("entry_file") or "")
+                if not entry_file:
+                    continue
+                try:
+                    count = int(case.get("count", 0))
+                except Exception:
+                    count = 0
+                counts_by_entry[Path(entry_file).name] = max(0, count)
+                case_keys_by_entry[Path(entry_file).name] = str(case.get("case_key") or "")
+        try:
+            total_calls = int(info.get("total_calls", sum(counts_by_entry.values())))
+        except Exception:
+            total_calls = sum(counts_by_entry.values())
+        try:
+            unique_cases = int(info.get("unique_cases", len(counts_by_entry)))
+        except Exception:
+            unique_cases = len(counts_by_entry)
+        profiles[op_dir] = {
+            "total_calls": total_calls,
+            "unique_cases": unique_cases,
+            "case_counts_by_entry": counts_by_entry,
+            "case_keys_by_entry": case_keys_by_entry,
+        }
+    return profiles
+
+
+def _weighted_entry_mean_ms(
+    measurement: dict[str, Any],
+    case_counts_by_entry: dict[str, int],
+) -> float | None:
+    if not case_counts_by_entry:
+        return None
+    rows = measurement.get("entry_results")
+    if not isinstance(rows, list):
+        files = measurement.get("entry_files") or []
+        latencies = measurement.get("entry_latencies_ms") or []
+        rows = [
+            {"entry_file": entry_file, "latency_ms": latency}
+            for entry_file, latency in zip(files, latencies)
+        ]
+
+    weighted_total = 0.0
+    total_weight = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        entry_file = Path(str(row.get("entry_file") or "")).name
+        if not entry_file:
+            continue
+        weight = int(case_counts_by_entry.get(entry_file, 0))
+        if weight <= 0:
+            continue
+        try:
+            latency_ms = float(row.get("latency_ms"))
+        except Exception:
+            continue
+        weighted_total += latency_ms * float(weight)
+        total_weight += weight
+    if total_weight <= 0:
+        return None
+    return weighted_total / float(total_weight)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
@@ -676,6 +763,7 @@ def main() -> int:
         io_root = project_dir / "io" / "individual_ops"
         summary_path = project_dir / "io" / "summary.json"
         op_counts = _load_op_counts(summary_path)
+        unique_case_profiles = _load_unique_case_profiles(summary_path)
         if not io_root.exists() and not op_counts:
             write_json_file(
                 output_path,
@@ -868,6 +956,7 @@ def main() -> int:
             kernel_source_origin = ""
             generated_kernel_profiled = False
             kernel_entry_latencies = []
+            kernel_entry_results = []
             kernel_benchmarked_entry_files = []
             if optimized_root:
                 kernel_ms, kernel_status, backend = _read_best_kernel_ms(optimized_root / op_name)
@@ -898,6 +987,11 @@ def main() -> int:
                     kernel_status = "ok"
                     kernel_entry_latencies = (
                         generated_stats.get("entry_latencies_ms")
+                        if isinstance(generated_stats, dict)
+                        else []
+                    ) or []
+                    kernel_entry_results = (
+                        generated_stats.get("entry_results")
                         if isinstance(generated_stats, dict)
                         else []
                     ) or []
@@ -954,8 +1048,36 @@ def main() -> int:
                 )
                 continue
 
+            case_profile = unique_case_profiles.get(op_name, {})
+            case_counts_by_entry = case_profile.get("case_counts_by_entry")
+            if not isinstance(case_counts_by_entry, dict):
+                case_counts_by_entry = {}
+            weighted_pytorch_ms = _weighted_entry_mean_ms(
+                pytorch_measurement,
+                {str(k): int(v) for k, v in case_counts_by_entry.items()},
+            )
+            kernel_measurement_for_weights = {
+                "entry_results": kernel_entry_results,
+                "entry_files": kernel_benchmarked_entry_files,
+                "entry_latencies_ms": kernel_entry_latencies,
+            }
+            weighted_kernel_ms = _weighted_entry_mean_ms(
+                kernel_measurement_for_weights,
+                {str(k): int(v) for k, v in case_counts_by_entry.items()},
+            )
+
             winner = "pytorch"
-            if kernel_status == "ok" and kernel_ms is not None and pytorch_ms and kernel_ms < pytorch_ms:
+            compare_pytorch_ms = pytorch_ms
+            compare_kernel_ms = kernel_ms
+            if weighted_pytorch_ms is not None and weighted_kernel_ms is not None:
+                compare_pytorch_ms = weighted_pytorch_ms
+                compare_kernel_ms = weighted_kernel_ms
+            if (
+                kernel_status == "ok"
+                and compare_kernel_ms is not None
+                and compare_pytorch_ms
+                and compare_kernel_ms < compare_pytorch_ms
+            ):
                 winner = "optimized"
 
             row = {
@@ -972,6 +1094,23 @@ def main() -> int:
                 "winner": winner,
                 "baseline_source": baseline_source,
             }
+            if case_profile:
+                row["profile_total_calls"] = int(case_profile.get("total_calls", count))
+                row["profile_unique_cases"] = int(case_profile.get("unique_cases", benchmarked_entry_count))
+                row["profile_case_counts_by_entry"] = case_counts_by_entry
+                case_keys_by_entry = case_profile.get("case_keys_by_entry")
+                if isinstance(case_keys_by_entry, dict):
+                    row["profile_case_keys_by_entry"] = case_keys_by_entry
+            if weighted_pytorch_ms is not None:
+                row["weighted_pytorch_ms"] = float(weighted_pytorch_ms)
+            if weighted_kernel_ms is not None:
+                row["weighted_kernel_ms"] = float(weighted_kernel_ms)
+            if weighted_pytorch_ms is not None and weighted_kernel_ms:
+                row["weighted_speedup"] = (
+                    float(weighted_pytorch_ms / weighted_kernel_ms)
+                    if weighted_kernel_ms > 0
+                    else None
+                )
             if kernel_benchmarked_entry_files:
                 row["kernel_benchmarked_entry_files"] = kernel_benchmarked_entry_files
             if backend:

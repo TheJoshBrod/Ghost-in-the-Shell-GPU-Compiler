@@ -1,0 +1,62 @@
+{
+  "artifacts": {
+    "weights": []
+  },
+  "backend": "cuda",
+  "base_name": "sd35-medium-bf16-gb10-unique",
+  "benchmarked_gpu": {
+    "connection": "local",
+    "identity": "NVIDIA GB10:local",
+    "name": "NVIDIA GB10",
+    "uuid": ""
+  },
+  "created_at": "2026-05-05T00:00:00Z",
+  "generator": {
+    "extra_validation_cases": 1,
+    "max_attempts": 8,
+    "max_ops": 0,
+    "only_ops": [],
+    "skip_ops": [],
+    "target_device": "cuda",
+    "use_baseline_as_template": false,
+    "use_baseline_kernels": false
+  },
+  "llm": {
+    "model": "claude-opus-4-7",
+    "provider": "anthropic"
+  },
+  "paper_metadata": {
+    "dataset_role": "forge_validation_calibration",
+    "external_benchmark_dataset": "NinaKarine/t2i-compbench validation splits",
+    "external_benchmark_role": "paper_candidate_prompt_workload",
+    "model_id": "stabilityai/stable-diffusion-3.5-medium",
+    "model_slug": "sd35_medium",
+    "profile_capture_policy": "sd35_prompt_trace_unique_kernel_cases",
+    "profile_max_prompts": 4,
+    "profile_note": "Diffusion profiling uses a frozen PartiPrompts calibration subset and saves one replay entry per unique kernel case, with frequency counts preserving the observed call distribution.",
+    "profile_target_device": "cuda",
+    "quantization": "bf16",
+    "target_device": "gb10",
+    "validation_prompt_count": 16,
+    "validation_zip": "/home/gb10/Projects/Kernal-Forge/CGinS/paper_benchmarks/data_collection/forge_inputs/validation_sd35_partiprompts_forge_v1.zip"
+  },
+  "profile": {
+    "allow_ops": [
+      "linear",
+      "scaled_dot_product_attention",
+      "layer_norm",
+      "group_norm",
+      "silu",
+      "gelu",
+      "conv2d"
+    ],
+    "capture_policy": "sd35_prompt_trace_unique_kernel_cases",
+    "max_batches": 4,
+    "max_calls_per_op": 16,
+    "max_saved_entries_per_op": 256,
+    "max_tensor_elements": 200000000,
+    "skip_ops": [],
+    "skip_prefixes": []
+  },
+  "validation_dir": "data/validation"
+}

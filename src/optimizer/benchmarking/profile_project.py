@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -97,6 +98,8 @@ calls: dict[str, list[dict[str, Any]]] = {}
 _wrapped: set[Any] = set()
 ENABLE_WRAPPING = True
 skipped_counts: dict[str, int] = {}
+unique_case_counts: dict[str, dict[str, int]] = {}
+unique_case_metadata: dict[str, dict[str, dict[str, Any]]] = {}
 TENSOR_IADD_FUNCTION_NAME = "torch.tensor.iadd"
 _ORIGINAL_TENSOR_IADD = None
 _TENSOR_IADD_SIGNATURE = {
@@ -117,6 +120,150 @@ def _serialize(v):
     if isinstance(v, dict):
         return {k: _serialize(x) for k, x in v.items()}
     return v  # torch.dtype, torch.device, int, float, bool, None, etc.
+
+
+_UNIQUE_CAPTURE_VALUES = {"unique", "unique_cases", "unique-case", "unique_kernel_cases"}
+
+
+def _profile_capture_mode() -> str:
+    raw = os.environ.get("KFORGE_PROFILE_CAPTURE_MODE", "").strip().lower()
+    if raw in _UNIQUE_CAPTURE_VALUES:
+        return "unique"
+    return "capped"
+
+
+def _is_unique_capture_mode() -> bool:
+    return _profile_capture_mode() == "unique"
+
+
+def _memory_format_flags(tensor: torch.Tensor) -> list[str]:
+    flags: list[str] = []
+    try:
+        if tensor.is_contiguous():
+            flags.append("contiguous")
+    except Exception:
+        pass
+    try:
+        if tensor.dim() == 4 and tensor.is_contiguous(memory_format=torch.channels_last):
+            flags.append("channels_last")
+    except Exception:
+        pass
+    try:
+        if tensor.dim() == 5 and tensor.is_contiguous(memory_format=torch.channels_last_3d):
+            flags.append("channels_last_3d")
+    except Exception:
+        pass
+    return flags
+
+
+def _profile_signature_value(value: Any) -> Any:
+    if torch.is_tensor(value):
+        try:
+            device_type = str(value.device.type)
+        except Exception:
+            device_type = ""
+        try:
+            storage_offset = int(value.storage_offset())
+        except Exception:
+            storage_offset = 0
+        return {
+            "type": "tensor",
+            "shape": [int(dim) for dim in value.shape],
+            "dtype": str(value.dtype),
+            "device_type": device_type,
+            "layout": str(value.layout),
+            "stride": [int(dim) for dim in value.stride()],
+            "storage_offset": storage_offset,
+            "requires_grad": bool(value.requires_grad),
+            "memory_format": _memory_format_flags(value),
+        }
+    if isinstance(value, torch.Size):
+        return {"type": "torch.Size", "items": [int(dim) for dim in value]}
+    if isinstance(value, torch.dtype):
+        return {"type": "torch.dtype", "value": str(value)}
+    if isinstance(value, torch.device):
+        return {"type": "torch.device", "value": str(value)}
+    if isinstance(value, (list, tuple)):
+        return {
+            "type": type(value).__name__,
+            "items": [_profile_signature_value(item) for item in value],
+        }
+    if isinstance(value, dict):
+        items = []
+        for key in sorted(value.keys(), key=lambda item: str(item)):
+            items.append([str(key), _profile_signature_value(value[key])])
+        return {"type": "dict", "items": items}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return {"type": type(value).__name__, "value": repr(value)}
+
+
+def _profile_case_payload(function_name: str, args: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "function_name": function_name,
+        "args": _profile_signature_value(args),
+        "kwargs": _profile_signature_value(kwargs),
+    }
+
+
+def _profile_case_key(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _record_unique_case(function_name: str, payload: dict[str, Any]) -> tuple[str, bool]:
+    case_key = _profile_case_key(payload)
+    counts = unique_case_counts.setdefault(function_name, {})
+    next_count = counts.get(case_key, 0) + 1
+    counts[case_key] = next_count
+
+    metadata = unique_case_metadata.setdefault(function_name, {})
+    case_meta = metadata.setdefault(case_key, {"case_key": case_key, "signature": payload})
+    case_meta["count"] = next_count
+    return case_key, next_count == 1
+
+
+def _annotate_unique_entry(entry: dict[str, Any], case_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    entry["profile_case_key"] = case_key
+    entry["profile_case_count"] = 1
+    entry["profile_case_signature"] = payload
+    return entry
+
+
+def _op_dir_name(function_name: str) -> str:
+    return function_name.replace(".", "_").replace("/", "_")
+
+
+def _unique_case_summary() -> dict[str, Any]:
+    ops: dict[str, Any] = {}
+    for function_name in sorted(unique_case_counts.keys()):
+        case_counts = unique_case_counts[function_name]
+        metadata = unique_case_metadata.get(function_name, {})
+        cases: list[dict[str, Any]] = []
+        for case_key in sorted(case_counts.keys()):
+            case_meta = dict(metadata.get(case_key, {}))
+            case_meta["case_key"] = case_key
+            case_meta["count"] = int(case_counts[case_key])
+            cases.append(case_meta)
+        total_calls = sum(int(value) for value in case_counts.values())
+        ops[function_name] = {
+            "op_dir": _op_dir_name(function_name),
+            "total_calls": int(total_calls),
+            "unique_cases": len(case_counts),
+            "duplicate_calls": int(total_calls - len(case_counts)),
+            "cases": cases,
+        }
+    return {
+        "capture_mode": "unique",
+        "ops": ops,
+    }
+
+
+def _reset_profile_capture_state() -> None:
+    calls.clear()
+    skipped_counts.clear()
+    unique_case_counts.clear()
+    unique_case_metadata.clear()
 
 
 # Known signatures for C-extension ops that lack Python-inspectable signatures.
@@ -312,13 +459,7 @@ def wrap_function(module, func_name: str) -> None:
             skipped_counts[key] = skipped_counts.get(key, 0) + 1
             return output
 
-        entries = calls.setdefault(key, [])
-        max_per_op = _profile_max_per_op()
-        if _profile_limit_reached(len(entries), max_per_op):
-            skipped_counts[f"{key}:profile_max_per_op"] = skipped_counts.get(f"{key}:profile_max_per_op", 0) + 1
-            return output
-
-        ser_output = _serialize(output)
+        unique_capture = _is_unique_capture_mode()
 
         # Try to resolve full parameter set including defaults.
         # _func_sig is always a real inspect.Signature when set, so bind() +
@@ -327,25 +468,70 @@ def wrap_function(module, func_name: str) -> None:
             try:
                 bound = _func_sig.bind(*args, **kwargs)
                 bound.apply_defaults()
+                live_kwargs = dict(bound.arguments)
+                case_key = ""
+                case_payload: dict[str, Any] | None = None
+                if unique_capture:
+                    case_payload = _profile_case_payload(key, [], live_kwargs)
+                    case_key, should_save = _record_unique_case(key, case_payload)
+                    if not should_save:
+                        duplicate_key = f"{key}:duplicate_profile_case"
+                        skipped_counts[duplicate_key] = skipped_counts.get(duplicate_key, 0) + 1
+                        return output
+                else:
+                    entries = calls.setdefault(key, [])
+                    max_per_op = _profile_max_per_op()
+                    if _profile_limit_reached(len(entries), max_per_op):
+                        limit_key = f"{key}:profile_max_per_op"
+                        skipped_counts[limit_key] = skipped_counts.get(limit_key, 0) + 1
+                        return output
+
+                entries = calls.setdefault(key, [])
+                ser_output = _serialize(output)
                 resolved_kwargs = {k: _serialize(v) for k, v in bound.arguments.items()}
-                entries.append({
+                entry = {
                     "function_name": key,
                     "args": [],
                     "kwargs": resolved_kwargs,
                     "output": ser_output,
                     "signature": {"params": _sig_params, "defaults": _sig_defaults, "kinds": _sig_kinds},
-                })
+                }
+                if unique_capture and case_payload is not None:
+                    _annotate_unique_entry(entry, case_key, case_payload)
+                entries.append(entry)
                 return output
             except TypeError:
                 pass  # bind failed — fall through to original
 
+        case_key = ""
+        case_payload = None
+        if unique_capture:
+            case_payload = _profile_case_payload(key, list(args), dict(kwargs))
+            case_key, should_save = _record_unique_case(key, case_payload)
+            if not should_save:
+                duplicate_key = f"{key}:duplicate_profile_case"
+                skipped_counts[duplicate_key] = skipped_counts.get(duplicate_key, 0) + 1
+                return output
+        else:
+            entries = calls.setdefault(key, [])
+            max_per_op = _profile_max_per_op()
+            if _profile_limit_reached(len(entries), max_per_op):
+                limit_key = f"{key}:profile_max_per_op"
+                skipped_counts[limit_key] = skipped_counts.get(limit_key, 0) + 1
+                return output
+
         # Original recording path (fallback)
-        entries.append({
+        entries = calls.setdefault(key, [])
+        ser_output = _serialize(output)
+        entry = {
             "function_name": key,
             "args": [_serialize(a) for a in args],
             "kwargs": {k: _serialize(v) for k, v in kwargs.items()},
             "output": ser_output,
-        })
+        }
+        if unique_capture and case_payload is not None:
+            _annotate_unique_entry(entry, case_key, case_payload)
+        entries.append(entry)
         return output
 
     setattr(module, func_name, wrapper)
@@ -382,10 +568,11 @@ def wrap_tensor_iadd() -> None:
     def wrapper(self, other):
         lhs_before = None
         other_before = None
+        unique_capture = _is_unique_capture_mode()
         if not _should_skip(TENSOR_IADD_FUNCTION_NAME):
             entries = calls.setdefault(TENSOR_IADD_FUNCTION_NAME, [])
             max_per_op = _profile_max_per_op()
-            if not _profile_limit_reached(len(entries), max_per_op):
+            if unique_capture or not _profile_limit_reached(len(entries), max_per_op):
                 lhs_before = _clone_for_profile(self)
                 other_before = _clone_for_profile(other)
 
@@ -397,7 +584,7 @@ def wrap_tensor_iadd() -> None:
 
         entries = calls.setdefault(TENSOR_IADD_FUNCTION_NAME, [])
         max_per_op = _profile_max_per_op()
-        if _profile_limit_reached(len(entries), max_per_op):
+        if not unique_capture and _profile_limit_reached(len(entries), max_per_op):
             key = f"{TENSOR_IADD_FUNCTION_NAME}:profile_max_per_op"
             skipped_counts[key] = skipped_counts.get(key, 0) + 1
             return output
@@ -406,7 +593,21 @@ def wrap_tensor_iadd() -> None:
             lhs_before = _clone_for_profile(self)
         if other_before is None:
             other_before = _clone_for_profile(other)
-        entries.append({
+        case_payload = None
+        case_key = ""
+        if unique_capture:
+            case_payload = _profile_case_payload(
+                TENSOR_IADD_FUNCTION_NAME,
+                [],
+                {"input": lhs_before, "other": other_before},
+            )
+            case_key, should_save = _record_unique_case(TENSOR_IADD_FUNCTION_NAME, case_payload)
+            if not should_save:
+                duplicate_key = f"{TENSOR_IADD_FUNCTION_NAME}:duplicate_profile_case"
+                skipped_counts[duplicate_key] = skipped_counts.get(duplicate_key, 0) + 1
+                return output
+
+        entry = {
             "function_name": TENSOR_IADD_FUNCTION_NAME,
             "args": [],
             "kwargs": {
@@ -415,7 +616,10 @@ def wrap_tensor_iadd() -> None:
             },
             "output": _serialize(output),
             "signature": _TENSOR_IADD_SIGNATURE,
-        })
+        }
+        if unique_capture and case_payload is not None:
+            _annotate_unique_entry(entry, case_key, case_payload)
+        entries.append(entry)
         return output
 
     torch.Tensor.__iadd__ = wrapper
@@ -438,7 +642,7 @@ def save_entries(
     base_dir: str,
     max_per_op: int | None = 200,
 ) -> None:
-    func_dir = os.path.join(base_dir, func_name.replace(".", "_").replace("/", "_"))
+    func_dir = os.path.join(base_dir, _op_dir_name(func_name))
     os.makedirs(func_dir, exist_ok=True)
 
     existing_count = len(
@@ -454,8 +658,14 @@ def save_entries(
     for idx, entry in enumerate(entries):
         if _profile_limit_reached(existing_count + idx, max_per_op):
             return
-        file_path = os.path.join(func_dir, f"entry_{existing_count + idx:06d}.pt")
+        file_name = f"entry_{existing_count + idx:06d}.pt"
+        file_path = os.path.join(func_dir, file_name)
         torch.save(entry, file_path)
+        case_key = entry.get("profile_case_key")
+        if case_key:
+            metadata = unique_case_metadata.setdefault(func_name, {})
+            case_meta = metadata.setdefault(str(case_key), {"case_key": str(case_key)})
+            case_meta["entry_file"] = file_name
 
 
 def flush_calls(base_dir: str, max_per_op: int | None = 200) -> dict[str, int]:
@@ -785,6 +995,7 @@ def main() -> int:
 
     device = _resolve_device()
     config = load_project_config(project_dir)
+    _reset_profile_capture_state()
     _load_profile_filters(config)
     wrap_torch_nn_functional()
     wrap_tensor_iadd()
@@ -811,6 +1022,7 @@ def main() -> int:
     op_totals: dict[str, int] = {}
     op_profile_ms: dict[str, float] = {}
     max_per_op = _profile_max_per_op()
+    capture_mode = _profile_capture_mode()
 
     with torch.no_grad():
         for sample in samples:
@@ -822,9 +1034,17 @@ def main() -> int:
             except TypeError:
                 model(*args_tuple)
 
-            batch_counts = flush_calls(str(out_dir), max_per_op=max_per_op)
+            save_max_per_op = None if capture_mode == "unique" else max_per_op
+            batch_counts = flush_calls(str(out_dir), max_per_op=save_max_per_op)
             for k, v in batch_counts.items():
                 op_totals[k] = op_totals.get(k, 0) + v
+
+    if capture_mode == "unique":
+        unique_summary = _unique_case_summary()
+        op_totals = {
+            function_name: int(info.get("total_calls", 0))
+            for function_name, info in unique_summary.get("ops", {}).items()
+        }
 
     if samples and len(op_totals) < 3:
         fallback_stats = _collect_fallback_aten_stats(model, samples[0], device)
@@ -845,9 +1065,12 @@ def main() -> int:
                     op_profile_ms[k] = float(info["avg_ms"])
 
     summary_path = out_dir.parent / "summary.json"
+    unique_summary = _unique_case_summary() if capture_mode == "unique" else {}
+    unique_cases_path = out_dir.parent / "unique_cases.json"
     summary = {
         "project": project_dir.name,
         "device": device,
+        "profile_capture_mode": capture_mode,
         "profile_max_per_op": _format_profile_max_per_op(max_per_op),
         "op_counts": op_totals,
         "op_profile_ms": op_profile_ms,
@@ -858,6 +1081,13 @@ def main() -> int:
             "skip_prefixes": sorted(PROFILE_SKIP_PREFIXES),
         },
     }
+    if capture_mode == "unique":
+        summary["op_unique_counts"] = {
+            function_name: int(info.get("unique_cases", 0))
+            for function_name, info in unique_summary.get("ops", {}).items()
+        }
+        summary["unique_cases_path"] = str(unique_cases_path)
+        write_json_file(unique_cases_path, unique_summary)
     write_json_file(summary_path, summary)
     print(f"Saved profiling entries to {out_dir}")
     print(f"Summary written to {summary_path}")

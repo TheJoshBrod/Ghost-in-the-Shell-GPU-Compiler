@@ -19,6 +19,9 @@ def _run(cmd: list[str], cwd: Path) -> int:
 
 
 def _benchmark_max_entries_args_from_env() -> list[str]:
+    capture_mode = os.environ.get("KFORGE_PROFILE_CAPTURE_MODE", "").strip().lower()
+    if capture_mode in {"unique", "unique_cases", "unique-case", "unique_kernel_cases"}:
+        return ["--max-entries", "all"]
     raw = os.environ.get("KFORGE_PROFILE_MAX_PER_OP", "").strip().lower()
     if raw in _PROFILE_MAX_ALL_VALUES:
         return ["--max-entries", "all"]

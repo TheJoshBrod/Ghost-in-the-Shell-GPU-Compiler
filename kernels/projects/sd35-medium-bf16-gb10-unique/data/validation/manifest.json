@@ -1,0 +1,13 @@
+{
+  "created_at_utc": "2026-05-05T00:00:00Z",
+  "dataset": "google-research/parti PartiPrompts",
+  "dataset_license": "Apache-2.0",
+  "dataset_role": "forge_validation_calibration",
+  "limit": 16,
+  "prompt_count": 16,
+  "prompt_file": "/home/gb10/Projects/Kernal-Forge/CGinS/paper_benchmarks/workloads/sd35/partiprompts_forge_v1.jsonl",
+  "prompt_file_hash": "4b0cc1dab7aebca61f65f0c878c8fdcd80aa4807d5c2491c7c6c50d05b44d74c",
+  "prompt_text_may_be_stored_in_raw_artifacts": true,
+  "source_url": "https://raw.githubusercontent.com/google-research/parti/main/PartiPrompts.tsv",
+  "synthetic_workload": false
+}
