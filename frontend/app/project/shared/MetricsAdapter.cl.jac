@@ -181,6 +181,53 @@ def:pub pick_forged_ms(row: Any) -> Any {
     return to_num(forged_raw);
 }
 
+def:pub pick_pytorch_total_ms(row: Any, count_val: int = 1) -> Any {
+    if not row {
+        return None;
+    }
+    total_raw = None;
+    if "pytorch_total_ms" in row {
+        total_raw = row["pytorch_total_ms"];
+    }
+    if total_raw is None and "eager_weighted_ms" in row {
+        total_raw = row["eager_weighted_ms"];
+    }
+    parsed_total = to_num(total_raw);
+    if parsed_total != None and parsed_total > 0 {
+        return parsed_total;
+    }
+    per_call = pick_pytorch_ms(row);
+    if per_call != None and per_call > 0 and count_val > 0 {
+        return per_call * count_val;
+    }
+    return None;
+}
+
+def:pub pick_forged_total_ms(row: Any, count_val: int = 1) -> Any {
+    if not row {
+        return None;
+    }
+    total_raw = None;
+    if "forged_total_ms" in row {
+        total_raw = row["forged_total_ms"];
+    }
+    if total_raw is None and "optimized_total_ms" in row {
+        total_raw = row["optimized_total_ms"];
+    }
+    if total_raw is None and "forge_weighted_ms" in row {
+        total_raw = row["forge_weighted_ms"];
+    }
+    parsed_total = to_num(total_raw);
+    if parsed_total != None and parsed_total > 0 {
+        return parsed_total;
+    }
+    per_call = pick_forged_ms(row);
+    if per_call != None and per_call > 0 and count_val > 0 {
+        return per_call * count_val;
+    }
+    return None;
+}
+
 def:pub normalize_speed_rows(rows: Any) -> list {
     out = [];
     idx = 0;
@@ -193,8 +240,23 @@ def:pub normalize_speed_rows(rows: Any) -> list {
         row_name = pick_row_name(row, idx);
         pytorch_val = pick_pytorch_ms(row);
         forged_val = pick_forged_ms(row);
+        count_val = 1;
+        raw_count = None;
+        if "trace_calls" in row {
+            raw_count = row["trace_calls"];
+        } elif "count" in row {
+            raw_count = row["count"];
+        }
+        if raw_count != None {
+            parsed_count = parseInt(f"{raw_count}");
+            if parsed_count == parsed_count and parsed_count > 0 {
+                count_val = parsed_count;
+            }
+        }
+        pytorch_total_val = pick_pytorch_total_ms(row, count_val);
+        forged_total_val = pick_forged_total_ms(row, count_val);
 
-        if pytorch_val is None and forged_val is None {
+        if pytorch_val is None and forged_val is None and pytorch_total_val is None and forged_total_val is None {
             idx += 1;
             continue;
         }
@@ -202,6 +264,8 @@ def:pub normalize_speed_rows(rows: Any) -> list {
         baseline_val = forged_val;
         if pytorch_val != None {
             baseline_val = pytorch_val;
+        } elif pytorch_total_val != None and count_val > 0 {
+            baseline_val = pytorch_total_val / count_val;
         }
         if baseline_val is None or baseline_val <= 0 {
             idx += 1;
@@ -211,9 +275,36 @@ def:pub normalize_speed_rows(rows: Any) -> list {
         forged_final = baseline_val;
         if forged_val != None and forged_val > 0 {
             forged_final = forged_val;
+        } elif forged_total_val != None and count_val > 0 {
+            forged_final = forged_total_val / count_val;
         }
 
-        out.push({"name": row_name, "pytorch": baseline_val, "forged": forged_final});
+        next_row = {
+            "name": row_name,
+            "pytorch": baseline_val,
+            "forged": forged_final,
+            "count": count_val
+        };
+        if pytorch_total_val != None {
+            next_row["pytorch_total_ms"] = pytorch_total_val;
+        }
+        if forged_total_val != None {
+            next_row["forged_total_ms"] = forged_total_val;
+            next_row["optimized_total_ms"] = forged_total_val;
+        }
+        if "timing_source" in row and row["timing_source"] {
+            next_row["timing_source"] = row["timing_source"];
+        }
+        if "metric_arm" in row and row["metric_arm"] {
+            next_row["metric_arm"] = row["metric_arm"];
+        }
+        if "unique_cases" in row and row["unique_cases"] {
+            next_row["unique_cases"] = row["unique_cases"];
+        }
+        if "runtime_responsibility" in row and row["runtime_responsibility"] is not None {
+            next_row["runtime_responsibility"] = row["runtime_responsibility"];
+        }
+        out.push(next_row);
         idx += 1;
     }
     return out;
@@ -353,8 +444,20 @@ def:pub compute_speed_kpis(speed_rows: Any, op_rows: Any) -> dict {
 
         pytorch_num = to_num(pytorch_ms);
         forged_num = to_num(forged_ms);
+        count_val = 1;
+        if row_name in op_count_by_name {
+            count_val = op_count_by_name[row_name];
+        }
+        pytorch_total = pick_pytorch_total_ms(row, count_val);
+        forged_total = pick_forged_total_ms(row, count_val);
 
-        if pytorch_num != None and pytorch_num > 0 and forged_num != None and forged_num > 0 {
+        if pytorch_total != None and pytorch_total > 0 and forged_total != None and forged_total > 0 {
+            speedup = parseFloat(f"{pytorch_total}") / parseFloat(f"{forged_total}");
+            if speedup > best_speedup {
+                best_speedup = speedup;
+                has_best_speedup = True;
+            }
+        } elif pytorch_num != None and pytorch_num > 0 and forged_num != None and forged_num > 0 {
             speedup = parseFloat(f"{pytorch_num}") / parseFloat(f"{forged_num}");
             if speedup > best_speedup {
                 best_speedup = speedup;
@@ -362,11 +465,12 @@ def:pub compute_speed_kpis(speed_rows: Any, op_rows: Any) -> dict {
             }
         }
 
-        if pytorch_num != None and forged_num != None {
-            count_val = 1;
-            if row_name in op_count_by_name {
-                count_val = op_count_by_name[row_name];
+        if pytorch_total != None and forged_total != None {
+            delta = parseFloat(f"{pytorch_total}") - parseFloat(f"{forged_total}");
+            if delta > 0 {
+                total_saved_ms += delta;
             }
+        } elif pytorch_num != None and forged_num != None {
             delta = (parseFloat(f"{pytorch_num}") - parseFloat(f"{forged_num}")) * count_val;
             if delta > 0 {
                 total_saved_ms += delta;
@@ -441,7 +545,22 @@ def:pub build_dashboard_metrics_view(
         if row_name in op_count_by_name {
             count_val = op_count_by_name[row_name];
         }
+        pytorch_total = pick_pytorch_total_ms(row, count_val);
+        forged_total = pick_forged_total_ms(row, count_val);
         total_ms = selected_num * count_val;
+        if op_time_mode == "pytorch" and pytorch_total != None {
+            total_ms = pytorch_total;
+        } elif op_time_mode == "forged" and forged_total != None {
+            total_ms = forged_total;
+        } elif op_time_mode == "best" {
+            if pytorch_total != None and forged_total != None {
+                total_ms = pytorch_total if pytorch_total <= forged_total else forged_total;
+            } elif forged_total != None {
+                total_ms = forged_total;
+            } elif pytorch_total != None {
+                total_ms = pytorch_total;
+            }
+        }
         if total_ms <= 0 {
             continue;
         }
@@ -536,7 +655,31 @@ def:pub build_dashboard_metrics_view(
         ratio_val = None;
         pytorch_num = to_num(pytorch_ms);
         forged_num = to_num(forged_ms);
-        if pytorch_num != None and pytorch_num > 0 and forged_num != None {
+        count_val = 1;
+        if row_name in op_count_by_name {
+            count_val = op_count_by_name[row_name];
+        } elif "count" in row {
+            raw_row_count = row["count"];
+            parsed_count = parseInt(f"{raw_row_count}");
+            if parsed_count == parsed_count and parsed_count > 0 {
+                count_val = parsed_count;
+            }
+        }
+        pytorch_total = pick_pytorch_total_ms(row, count_val);
+        forged_total = pick_forged_total_ms(row, count_val);
+        chart_pytorch = pytorch_ms;
+        chart_forged = forged_ms;
+        if pytorch_total != None {
+            chart_pytorch = pytorch_total;
+        }
+        if forged_total != None {
+            chart_forged = forged_total;
+        }
+        if pytorch_total != None and pytorch_total > 0 and forged_total != None {
+            forged_float = parseFloat(f"{forged_total}");
+            pytorch_float = parseFloat(f"{pytorch_total}");
+            ratio_val = forged_float / pytorch_float;
+        } elif pytorch_num != None and pytorch_num > 0 and forged_num != None {
             forged_float = parseFloat(f"{forged_num}");
             pytorch_float = parseFloat(f"{pytorch_num}");
             ratio_val = forged_float / pytorch_float;
@@ -544,16 +687,16 @@ def:pub build_dashboard_metrics_view(
 
         next_row = {
             "name": row_name,
-            "sort_ms": sort_ms,
+            "sort_ms": chart_pytorch if chart_pytorch != None else sort_ms,
             "pytorch": 0,
             "forged": 0,
             "ratio": ratio_val
         };
-        if pytorch_ms != None {
-            next_row["pytorch"] = pytorch_ms;
+        if chart_pytorch != None {
+            next_row["pytorch"] = chart_pytorch;
         }
-        if forged_ms != None {
-            next_row["forged"] = forged_ms;
+        if chart_forged != None {
+            next_row["forged"] = chart_forged;
         }
         comparison_rows.push(next_row);
     }

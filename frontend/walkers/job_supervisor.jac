@@ -8,6 +8,7 @@ import sys;
 import subprocess;
 import shutil;
 import sqlite3;
+import csv;
 
 import from .globals { repo_root, config_store }
 import from .catalog_db {
@@ -2106,6 +2107,256 @@ def _to_int(raw: Any) -> int {
     }
 }
 
+def _to_float(raw: Any) -> Any {
+    if raw is None {
+        return None;
+    }
+    try {
+        val = float(raw);
+        if val == val {
+            return val;
+        }
+    } except Exception {
+        _ = 0;
+    }
+    return None;
+}
+
+def _first_present(row: dict, keys: list) -> Any {
+    if not row {
+        return None;
+    }
+    for key in keys {
+        if key in row and row[key] is not None and str(row[key]) != "" {
+            return row[key];
+        }
+    }
+    return None;
+}
+
+def _trace_arm_rank(raw_arm: Any) -> int {
+    arm = str(raw_arm or "").lower().strip();
+    if not arm {
+        return 0;
+    }
+    if arm == "zero" or arm == "zeroshot" or arm == "zero_shot" {
+        return 0;
+    }
+    if "50" in arm {
+        return 50;
+    }
+    if "20" in arm {
+        return 20;
+    }
+    if "10" in arm {
+        return 10;
+    }
+    if "5" in arm or "05" in arm {
+        return 5;
+    }
+    return 1;
+}
+
+def _read_trace_weighted_csv(csv_path: str, project_name: str) -> list {
+    rows = [];
+    if not csv_path or not path.exists(csv_path) {
+        return rows;
+    }
+    try {
+        with open(csv_path, "r", encoding="utf-8", newline="") as f {
+            reader = csv.DictReader(f);
+            for row in reader {
+                if not row {
+                    continue;
+                }
+                row_project = (
+                    str(row["project"])
+                    if "project" in row and row["project"]
+                    else (
+                        str(row["project_name"])
+                        if "project_name" in row and row["project_name"]
+                        else ""
+                    )
+                );
+                if row_project and row_project != project_name {
+                    continue;
+                }
+                rows.append(row);
+            }
+        }
+    } except Exception as e {
+        print(f"Error reading trace-weighted CSV {csv_path}: {e}");
+    }
+    return rows;
+}
+
+def _read_trace_weighted_json(json_path: str, project_name: str) -> list {
+    rows = [];
+    if not json_path or not path.exists(json_path) {
+        return rows;
+    }
+    try {
+        with open(json_path, "r", encoding="utf-8") as f {
+            payload = load(f);
+        }
+        raw_rows = [];
+        if payload and "op_rows" in payload and payload["op_rows"] {
+            raw_rows = payload["op_rows"];
+        } elif payload and "rows" in payload and payload["rows"] {
+            raw_rows = payload["rows"];
+        } elif payload and "ops" in payload and payload["ops"] {
+            raw_rows = payload["ops"];
+        }
+        for row in raw_rows {
+            if not row {
+                continue;
+            }
+            row_project = (
+                str(row["project"])
+                if "project" in row and row["project"]
+                else project_name
+            );
+            if row_project and row_project != project_name {
+                continue;
+            }
+            rows.append(row);
+        }
+    } except Exception as e {
+        print(f"Error reading trace-weighted JSON {json_path}: {e}");
+    }
+    return rows;
+}
+
+def _select_trace_weighted_rows(project_name: str, raw_rows: list, source_path: str) -> dict {
+    by_arm = {};
+    for raw in raw_rows {
+        if not raw {
+            continue;
+        }
+        op_raw = _first_present(raw, ["op", "name", "operator"]);
+        op_name = _normalize_metric_op_name(op_raw);
+        if not op_name {
+            continue;
+        }
+        arm = str(_first_present(raw, ["arm", "metric_arm"]) or "current");
+        if not (arm in by_arm) {
+            by_arm[arm] = [];
+        }
+        by_arm[arm].append(raw);
+    }
+    selected_arm = "";
+    selected_rank = -1;
+    for arm in by_arm {
+        rank = _trace_arm_rank(arm);
+        if rank > selected_rank {
+            selected_rank = rank;
+            selected_arm = arm;
+        }
+    }
+    selected = {};
+    if not selected_arm {
+        return selected;
+    }
+    for raw in by_arm[selected_arm] {
+        op_name = _normalize_metric_op_name(_first_present(raw, ["op", "name", "operator"]));
+        if not op_name {
+            continue;
+        }
+        trace_calls = _to_int(_first_present(raw, ["trace_calls", "profile_total_calls", "count"]));
+        unique_cases = _to_int(_first_present(raw, ["unique_cases", "profile_unique_cases", "entries"]));
+        eager_total = _to_positive_float(
+            _first_present(raw, ["eager_weighted_ms", "pytorch_total_ms", "trace_weighted_pytorch_total_ms"])
+        );
+        forge_total = _to_positive_float(
+            _first_present(raw, ["forge_weighted_ms", "forged_total_ms", "trace_weighted_forge_total_ms"])
+        );
+        eager_per_call = _to_positive_float(
+            _first_present(raw, ["weighted_pytorch_ms", "pytorch_ms", "trace_weighted_pytorch_ms_per_call"])
+        );
+        forge_per_call = _to_positive_float(
+            _first_present(raw, ["weighted_kernel_ms", "weighted_forge_ms", "forged_ms", "trace_weighted_forge_ms_per_call"])
+        );
+        if eager_total is None and eager_per_call is not None and trace_calls > 0 {
+            eager_total = eager_per_call * trace_calls;
+        }
+        if forge_total is None and forge_per_call is not None and trace_calls > 0 {
+            forge_total = forge_per_call * trace_calls;
+        }
+        if eager_per_call is None and eager_total is not None and trace_calls > 0 {
+            eager_per_call = eager_total / trace_calls;
+        }
+        if forge_per_call is None and forge_total is not None and trace_calls > 0 {
+            forge_per_call = forge_total / trace_calls;
+        }
+        if eager_total is None and forge_total is None {
+            continue;
+        }
+        selected[op_name] = {
+            "eager_total_ms": eager_total,
+            "forge_total_ms": forge_total,
+            "eager_ms": eager_per_call,
+            "forge_ms": forge_per_call,
+            "trace_calls": trace_calls,
+            "unique_cases": unique_cases,
+            "timing_source": "trace_weighted",
+            "metric_arm": selected_arm,
+            "mixed_choice": (
+                str(raw["mixed_choice"])
+                if "mixed_choice" in raw and raw["mixed_choice"]
+                else (
+                    "forge"
+                    if eager_total is not None and forge_total is not None and forge_total < eager_total
+                    else "torch"
+                )
+            ),
+            "runtime_responsibility": _to_float(
+                raw["runtime_responsibility"]
+                    if "runtime_responsibility" in raw and raw["runtime_responsibility"] is not None
+                    else None
+            ),
+            "source": source_path
+        };
+    }
+    return selected;
+}
+
+def _load_trace_weighted_metrics(project_name: str, project_dir: str) -> dict {
+    candidates = [
+        {
+            "path": path.join(project_dir, "benchmarks", "trace_weighted_metrics.json"),
+            "kind": "json"
+        },
+        {
+            "path": path.join(project_dir, "benchmarks", "trace_weighted_per_op.csv"),
+            "kind": "csv"
+        },
+        {
+            "path": path.join(
+                repo_root,
+                "paper_benchmarks",
+                "runs",
+                "trace_weighted_unique_replay",
+                "all_unique_results",
+                "per_op.csv"
+            ),
+            "kind": "csv"
+        }
+    ];
+    for candidate in candidates {
+        source_path = candidate["path"];
+        raw_rows = (
+            _read_trace_weighted_json(source_path, project_name)
+            if candidate["kind"] == "json"
+            else _read_trace_weighted_csv(source_path, project_name)
+        );
+        selected = _select_trace_weighted_rows(project_name, raw_rows, source_path);
+        if selected {
+            return selected;
+        }
+    }
+    return {};
+}
+
 def _compute_project_metrics(project_name: str) -> dict {
     project_dir = _project_dir(project_name);
 
@@ -2202,11 +2453,21 @@ def _compute_project_metrics(project_name: str) -> dict {
             continue;
         }
         bench_by_op[op_name] = r;
+        profile_total_calls = _to_int(
+            r["profile_total_calls"]
+                if "profile_total_calls" in r and r["profile_total_calls"] is not None
+                else None
+        );
+        if profile_total_calls > 0 {
+            count_by_op[op_name] = profile_total_calls;
+        }
         if not (op_name in seen_bench) {
             bench_order.append(op_name);
             seen_bench[op_name] = True;
         }
     }
+
+    trace_weighted_by_op = _load_trace_weighted_metrics(project_name, project_dir);
 
     tree_best_by_op = {};
     tree_legacy_by_op = {};
@@ -2253,8 +2514,13 @@ def _compute_project_metrics(project_name: str) -> dict {
         b_row = bench_by_op[op_name];
         pytorch_raw = None;
         metric_name = "mean_time_ms";
+        total_ms = None;
+        trace_calls = count_by_op[op_name] if op_name in count_by_op else 0;
         
-        if "median_time_ms" in b_row and b_row["median_time_ms"] is not None {
+        if "weighted_pytorch_ms" in b_row and b_row["weighted_pytorch_ms"] is not None {
+            pytorch_raw = b_row["weighted_pytorch_ms"];
+            metric_name = "trace_weighted";
+        } elif "median_time_ms" in b_row and b_row["median_time_ms"] is not None {
             pytorch_raw = b_row["median_time_ms"];
             metric_name = "median_time_ms";
         } elif "mean_time_ms" in b_row and b_row["mean_time_ms"] is not None {
@@ -2269,9 +2535,13 @@ def _compute_project_metrics(project_name: str) -> dict {
         }
         ms_val = _to_positive_float(pytorch_raw);
         if ms_val is not None {
+            if metric_name == "trace_weighted" and trace_calls > 0 {
+                total_ms = ms_val * trace_calls;
+            }
             baseline_by_op[op_name] = {
                 "value_ms": ms_val,
-                "timing_metric": metric_name
+                "timing_metric": metric_name,
+                "total_ms": total_ms
             };
         }
     }
@@ -2291,7 +2561,13 @@ def _compute_project_metrics(project_name: str) -> dict {
         kernel_ms = None;
         metric_name = "mean_time_ms";
         
-        if "kernel_median_ms" in b_row and b_row["kernel_median_ms"] is not None {
+        trace_calls = count_by_op[op_name] if op_name in count_by_op else 0;
+        total_ms = None;
+
+        if "weighted_kernel_ms" in b_row and b_row["weighted_kernel_ms"] is not None {
+            kernel_ms = b_row["weighted_kernel_ms"];
+            metric_name = "trace_weighted";
+        } elif "kernel_median_ms" in b_row and b_row["kernel_median_ms"] is not None {
             kernel_ms = b_row["kernel_median_ms"];
             metric_name = "median_time_ms";
         } elif "kernel_ms" in b_row and b_row["kernel_ms"] is not None {
@@ -2301,9 +2577,13 @@ def _compute_project_metrics(project_name: str) -> dict {
         
         ms_val = _to_positive_float(kernel_ms);
         if ms_val is not None {
+            if metric_name == "trace_weighted" and trace_calls > 0 {
+                total_ms = ms_val * trace_calls;
+            }
             forged_best_by_op[op_name] = {
                 "value_ms": ms_val,
-                "timing_metric": metric_name
+                "timing_metric": metric_name,
+                "total_ms": total_ms
             };
         }
     }
@@ -2314,6 +2594,50 @@ def _compute_project_metrics(project_name: str) -> dict {
             forged_best_by_op[op_name] = tree_data;
         } elif tree_ms < forged_best_by_op[op_name]["value_ms"] {
             forged_best_by_op[op_name] = tree_data;
+        }
+    }
+
+    for op_name in trace_weighted_by_op {
+        trace_entry = trace_weighted_by_op[op_name];
+        trace_calls = (
+            _to_int(trace_entry["trace_calls"])
+            if trace_entry and "trace_calls" in trace_entry
+            else 0
+        );
+        if trace_calls > 0 {
+            count_by_op[op_name] = trace_calls;
+        }
+        eager_ms = _to_positive_float(
+            trace_entry["eager_ms"] if trace_entry and "eager_ms" in trace_entry else None
+        );
+        eager_total = _to_positive_float(
+            trace_entry["eager_total_ms"]
+                if trace_entry and "eager_total_ms" in trace_entry
+                else None
+        );
+        forge_ms = _to_positive_float(
+            trace_entry["forge_ms"] if trace_entry and "forge_ms" in trace_entry else None
+        );
+        forge_total = _to_positive_float(
+            trace_entry["forge_total_ms"]
+                if trace_entry and "forge_total_ms" in trace_entry
+                else None
+        );
+        if eager_ms is not None or eager_total is not None {
+            baseline_by_op[op_name] = {
+                "value_ms": eager_ms,
+                "timing_metric": "trace_weighted",
+                "total_ms": eager_total,
+                "trace_entry": trace_entry
+            };
+        }
+        if forge_ms is not None or forge_total is not None {
+            forged_best_by_op[op_name] = {
+                "value_ms": forge_ms,
+                "timing_metric": "trace_weighted",
+                "total_ms": forge_total,
+                "trace_entry": trace_entry
+            };
         }
     }
 
@@ -2343,6 +2667,12 @@ def _compute_project_metrics(project_name: str) -> dict {
             seen_ops[op_name] = True;
         }
     }
+    for op_name in trace_weighted_by_op {
+        if not (op_name in seen_ops) {
+            all_ops.append(op_name);
+            seen_ops[op_name] = True;
+        }
+    }
 
     rows = [];
     rows_by_op = {};
@@ -2360,23 +2690,85 @@ def _compute_project_metrics(project_name: str) -> dict {
         }
 
         pytorch_data = baseline_by_op[op_name] if op_name in baseline_by_op else None;
-        pytorch_ms = pytorch_data["value_ms"] if pytorch_data else None;
+        pytorch_ms = (
+            pytorch_data["value_ms"]
+            if pytorch_data and "value_ms" in pytorch_data
+            else None
+        );
+        pytorch_total_ms = (
+            pytorch_data["total_ms"]
+            if pytorch_data and "total_ms" in pytorch_data
+            else None
+        );
+        if pytorch_total_ms is None and pytorch_ms is not None and count > 0 {
+            pytorch_total_ms = pytorch_ms * count;
+        }
         
         forged_data = forged_best_by_op[op_name] if op_name in forged_best_by_op else None;
-        forged_ms = forged_data["value_ms"] if forged_data else None;
+        forged_ms = (
+            forged_data["value_ms"]
+            if forged_data and "value_ms" in forged_data
+            else None
+        );
+        forged_total_ms = (
+            forged_data["total_ms"]
+            if forged_data and "total_ms" in forged_data
+            else None
+        );
+        if forged_total_ms is None and forged_ms is not None and count > 0 {
+            forged_total_ms = forged_ms * count;
+        }
+
+        timing_source = "median_fallback";
+        trace_entry = None;
+        if pytorch_data and "trace_entry" in pytorch_data and pytorch_data["trace_entry"] {
+            trace_entry = pytorch_data["trace_entry"];
+        } elif forged_data and "trace_entry" in forged_data and forged_data["trace_entry"] {
+            trace_entry = forged_data["trace_entry"];
+        }
+        if pytorch_data and "timing_metric" in pytorch_data and pytorch_data["timing_metric"] {
+            timing_source = str(pytorch_data["timing_metric"]);
+        }
+        if forged_data and "timing_metric" in forged_data and forged_data["timing_metric"] == "trace_weighted" {
+            timing_source = "trace_weighted";
+        }
+        unique_cases = (
+            _to_int(trace_entry["unique_cases"])
+            if trace_entry and "unique_cases" in trace_entry
+            else 0
+        );
+        runtime_responsibility = (
+            trace_entry["runtime_responsibility"]
+            if trace_entry
+            and "runtime_responsibility" in trace_entry
+            and trace_entry["runtime_responsibility"] is not None
+            else None
+        );
+        metric_arm = (
+            str(trace_entry["metric_arm"])
+            if trace_entry and "metric_arm" in trace_entry and trace_entry["metric_arm"]
+            else ""
+        );
 
         winner = "unknown";
-        if pytorch_ms is not None {
+        if pytorch_total_ms is not None or pytorch_ms is not None {
             winner = "pytorch";
         }
-        if forged_ms is not None and (pytorch_ms is None or forged_ms < pytorch_ms) {
+        if forged_total_ms is not None and (
+            pytorch_total_ms is None or forged_total_ms < pytorch_total_ms
+        ) {
+            winner = "forged";
+        } elif forged_ms is not None and forged_total_ms is None and (
+            pytorch_ms is None or forged_ms < pytorch_ms
+        ) {
             winner = "forged";
         }
 
-        effective_ms = forged_ms if forged_ms is not None else pytorch_ms;
-        total_time_ms = effective_ms * count
-            if effective_ms is not None and count > 0
-            else 0.0;
+        total_time_ms = (
+            forged_total_ms
+            if forged_total_ms is not None
+            else (pytorch_total_ms if pytorch_total_ms is not None else 0.0)
+        );
 
         row = {
             "name": op_name,
@@ -2388,20 +2780,63 @@ def _compute_project_metrics(project_name: str) -> dict {
             row["pytorch_ms"] = pytorch_ms;
             row["pytorch_timing_metric"] = pytorch_data["timing_metric"] if pytorch_data else "mean_time_ms";
         }
+        if pytorch_total_ms is not None {
+            row["pytorch_total_ms"] = pytorch_total_ms;
+        }
         if forged_ms is not None {
             row["forged_ms"] = forged_ms;
             row["forged_timing_metric"] = forged_data["timing_metric"] if forged_data else "mean_time_ms";
         } elif op_name in tree_legacy_by_op {
             row["forged_timing_metric"] = "legacy_value";
         }
+        if forged_total_ms is not None {
+            row["forged_total_ms"] = forged_total_ms;
+        }
+        if unique_cases > 0 {
+            row["unique_cases"] = unique_cases;
+        }
+        if timing_source {
+            row["timing_source"] = timing_source;
+        }
+        if metric_arm {
+            row["metric_arm"] = metric_arm;
+        }
+        if runtime_responsibility is not None {
+            row["runtime_responsibility"] = runtime_responsibility;
+        }
+        if pytorch_total_ms is not None and forged_total_ms is not None {
+            row["mixed_choice"] = "forge" if forged_total_ms < pytorch_total_ms else "torch";
+        }
         rows.append(row);
         rows_by_op[op_name] = row;
 
         if pytorch_ms is not None {
             speed_row = {"name": op_name, "pytorch": pytorch_ms};
+            if pytorch_total_ms is not None {
+                speed_row["pytorch_total_ms"] = pytorch_total_ms;
+            }
             if forged_ms is not None {
                 speed_row["forged"] = forged_ms;
                 speed_row["optimized"] = forged_ms;
+            }
+            if forged_total_ms is not None {
+                speed_row["forged_total_ms"] = forged_total_ms;
+                speed_row["optimized_total_ms"] = forged_total_ms;
+            }
+            if count > 0 {
+                speed_row["trace_calls"] = count;
+            }
+            if unique_cases > 0 {
+                speed_row["unique_cases"] = unique_cases;
+            }
+            if timing_source {
+                speed_row["timing_source"] = timing_source;
+            }
+            if metric_arm {
+                speed_row["metric_arm"] = metric_arm;
+            }
+            if runtime_responsibility is not None {
+                speed_row["runtime_responsibility"] = runtime_responsibility;
             }
             speed_comparison.append(speed_row);
         }
@@ -2410,6 +2845,15 @@ def _compute_project_metrics(project_name: str) -> dict {
             usage_row = {"name": op_name, "count": count, "total_time_ms": total_time_ms};
             if pytorch_ms is not None {
                 usage_row["profile_ms"] = pytorch_ms;
+            }
+            if pytorch_total_ms is not None {
+                usage_row["pytorch_total_ms"] = pytorch_total_ms;
+            }
+            if forged_total_ms is not None {
+                usage_row["forged_total_ms"] = forged_total_ms;
+            }
+            if timing_source {
+                usage_row["timing_source"] = timing_source;
             }
             operator_usage.append(usage_row);
         }
@@ -2485,6 +2929,16 @@ def:pub _collect_project_metrics(project_name: str) -> dict {
             );
             summary_path = path.join(_project_dir(project_name), "io", "summary.json");
             needs_refresh = False;
+            has_timing_source = False;
+            for prow in (persisted["rows"] if "rows" in persisted and persisted["rows"] else []) {
+                if prow and "timing_source" in prow and prow["timing_source"] {
+                    has_timing_source = True;
+                    break;
+                }
+            }
+            if not has_timing_source {
+                needs_refresh = True;
+            }
             if persisted_updated_at {
                 if _modified_after(summary_path, persisted_updated_at) {
                     needs_refresh = True;
@@ -2494,6 +2948,23 @@ def:pub _collect_project_metrics(project_name: str) -> dict {
                     needs_refresh = True;
                 } elif _has_optimize_outputs_after(
                     project_name, persisted_updated_at
+                ) {
+                    needs_refresh = True;
+                } elif _modified_after(
+                    path.join(_project_dir(project_name), "benchmarks", "trace_weighted_metrics.json"),
+                    persisted_updated_at
+                ) {
+                    needs_refresh = True;
+                } elif _modified_after(
+                    path.join(
+                        repo_root,
+                        "paper_benchmarks",
+                        "runs",
+                        "trace_weighted_unique_replay",
+                        "all_unique_results",
+                        "per_op.csv"
+                    ),
+                    persisted_updated_at
                 ) {
                     needs_refresh = True;
                 }

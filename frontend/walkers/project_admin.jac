@@ -687,7 +687,11 @@ walker:pub GetProjectOps {
                         if not op_name {
                             continue;
                         }
-                        ms_val = r["pytorch_ms"] if "pytorch_ms" in r and r["pytorch_ms"] is not None else None;
+                        ms_val = (
+                            r["weighted_pytorch_ms"]
+                            if "weighted_pytorch_ms" in r and r["weighted_pytorch_ms"] is not None
+                            else (r["pytorch_ms"] if "pytorch_ms" in r and r["pytorch_ms"] is not None else None)
+                        );
                         if ms_val is not None {
                             try {
                                 profile_ms_map[op_name] = float(ms_val);
