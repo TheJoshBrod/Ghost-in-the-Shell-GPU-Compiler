@@ -16,6 +16,8 @@ anthropic
 
 # ML / vision
 transformers
+diffusers>=0.38.0
+torchvision==0.25.0
 optimum-quanto
 pillow
 

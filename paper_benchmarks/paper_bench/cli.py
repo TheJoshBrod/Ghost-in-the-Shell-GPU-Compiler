@@ -31,6 +31,7 @@ from .registry import (
 )
 from .report import summarize_run
 from .schema import BenchmarkMode, CorrectnessStatus, EnvironmentArtifact, PERFORMANCE_STAGES, RunManifestArtifact, Stage, Variant, artifact_schema_bundle
+from .vision_runner import run_vision_benchmark
 
 
 def _default_registry_path() -> Path:
@@ -75,6 +76,7 @@ def _parse_args() -> argparse.Namespace:
         run_parser.add_argument("--kf-allow-jit", action=argparse.BooleanOptionalAction, default=True)
         run_parser.add_argument("--kf-fail-on-fallback", action=argparse.BooleanOptionalAction, default=True)
         run_parser.add_argument("--kf-record-runtime-stats", action=argparse.BooleanOptionalAction, default=True)
+        run_parser.add_argument("--skip-token-correctness", action="store_true")
         run_parser.add_argument("--certify-paper-ready", action="store_true")
 
     plan_llm = sub.add_parser("plan-llm")
@@ -88,6 +90,11 @@ def _parse_args() -> argparse.Namespace:
 
     run_llm = sub.add_parser("run-llm")
     add_llm_shared(run_llm)
+
+    run_vision = sub.add_parser("run-vision")
+    add_llm_shared(run_vision)
+    run_vision.add_argument("--max-images", type=int)
+    run_vision.add_argument("--full-workload", action="store_true")
 
     run_ops = sub.add_parser("run-ops")
     run_ops.add_argument("--entries-dir", required=True)
@@ -278,6 +285,111 @@ def _prepare_llm_run_context(
         common["config_hashes"][config_source_kind] = config_source_hash
     if common.get("workload_hash"):
         common["config_hashes"]["prompt_file"] = common["workload_hash"]
+    if getattr(model_spec, "expected_model_config_hash", None):
+        if common.get("model_config_hash") != model_spec.expected_model_config_hash:
+            issues = list(common.get("paper_eligibility_issues", []) or [])
+            issues.append("model config hash mismatch against expected_model_config_hash")
+            common["paper_eligibility_issues"] = list(dict.fromkeys(issues))
+            common["paper_eligible"] = False
+
+    if materialize_run_dir:
+        if args.out:
+            layout = create_run_layout_for_dir(args.out)
+        else:
+            layout = create_run_layout(args.runs_root, common["timestamp_utc"], model_spec.model_id, suite.suite_id)
+        run_dir = layout.run_dir
+        run_id = layout.run_id
+        write_commands_txt(layout.run_dir, sys.argv)
+    else:
+        run_id = make_run_id(common["timestamp_utc"], model_spec.model_id, suite.suite_id)
+        run_dir = Path(args.out) if args.out else Path(args.runs_root) / run_id
+        layout = None
+
+    common["run_id"] = run_id
+    manifest = RunManifestArtifact(
+        **common,
+        artifact_type="run_manifest",
+        benchmark_mode=suite.benchmark_mode,
+        variant=None,
+        stage=None,
+        warmup_count=suite.warmup_count,
+        timed_run_count=suite.timed_run_count,
+        latency_samples_ms=[],
+        correctness_status=CorrectnessStatus.not_applicable,
+        run_dir=str(run_dir),
+        variants_requested=requested_variants,
+        stages_requested=suite.stages,
+        description=suite.description,
+        notes=list(suite.notes),
+    )
+    env_artifact = EnvironmentArtifact(
+        **common,
+        artifact_type="environment_snapshot",
+        benchmark_mode=suite.benchmark_mode,
+        variant=None,
+        stage=None,
+        warmup_count=suite.warmup_count,
+        timed_run_count=suite.timed_run_count,
+        latency_samples_ms=[],
+        correctness_status=CorrectnessStatus.not_applicable,
+        notes=list(suite.notes),
+        **build_environment_artifact_fields(),
+    )
+    return layout, manifest, env_artifact, model_spec, suite, requested_variants
+
+
+def _prepare_vision_run_context(args: argparse.Namespace, *, materialize_run_dir: bool):
+    repo_root = Path(__file__).resolve().parents[2]
+    model_spec, config_source_path, config_source_kind = _resolve_llm_model(args)
+    suite, suite_path = _resolve_llm_suite(args)
+    requested_variants = _requested_variants(args, suite)
+    cast_package_path = args.cast_package or model_spec.cast_package_path
+    if Variant.kf_cast in requested_variants and not cast_package_path:
+        raise ValueError("kf_cast benchmarking requires --cast-package or a cast_package_path in the model config.")
+    if cast_package_path:
+        model_spec = model_spec.model_copy(update={"cast_package_path": cast_package_path})
+
+    paper_eligible = enforce_workload_policy(suite, args.allow_synthetic_demo)
+    common = collect_common_fields(
+        repo_root=repo_root,
+        model_id=model_spec.model_id,
+        model_path=model_spec.model_path,
+        model_config_path=model_spec.model_config_path,
+        suite_id=suite.suite_id,
+        suite_path=suite_path,
+        workload_path=suite.workload_path,
+        command_line=sys.argv,
+        paper_eligible=paper_eligible,
+        synthetic_workload=suite.synthetic_workload,
+        cast_package_path=cast_package_path,
+        registry_path=None if args.model_config else args.registry,
+        quantization=getattr(model_spec, "quantization", None),
+        quantization_config_hash=getattr(model_spec, "quantization_config_hash", None)
+        or _hash_json_payload(getattr(model_spec, "quantization_config", None)),
+        placement_profile=getattr(model_spec, "placement_profile", None),
+        model_license=getattr(model_spec, "model_license", None),
+        model_access_terms=getattr(model_spec, "model_access_terms", None),
+        workload_slug=getattr(suite, "workload_slug", None),
+        dataset_license=getattr(suite, "dataset_license", None),
+        dataset_access_terms=getattr(suite, "dataset_access_terms", None),
+        cache_mode=getattr(suite, "cache_mode", None),
+    )
+    common["compile_settings"] = _resolve_compile_settings(args, model_spec)
+    common["kf_settings"] = {
+        "cast_package_path": cast_package_path,
+        "require_precompiled": bool(args.kf_require_precompiled),
+        "allow_jit": bool(args.kf_allow_jit),
+        "fail_on_fallback": bool(args.kf_fail_on_fallback),
+        "record_runtime_stats": bool(args.kf_record_runtime_stats),
+        "placement_profile": getattr(model_spec, "placement_profile", None),
+        "device_map": getattr(model_spec, "device_map", None),
+        "max_memory": getattr(model_spec, "max_memory", None),
+    }
+    config_source_hash = safe_sha256_path(config_source_path)
+    if config_source_hash:
+        common["config_hashes"][config_source_kind] = config_source_hash
+    if common.get("workload_hash"):
+        common["config_hashes"]["image_manifest"] = common["workload_hash"]
     if getattr(model_spec, "expected_model_config_hash", None):
         if common.get("model_config_hash") != model_spec.expected_model_config_hash:
             issues = list(common.get("paper_eligibility_issues", []) or [])
@@ -691,6 +803,7 @@ def _cmd_run_llm(args: argparse.Namespace) -> int:
             store_prompts=bool(args.store_prompts),
             reuse_cache=bool(args.reuse_cache),
             cache_search_root=_cache_search_root(args, layout),
+            skip_token_correctness=bool(args.skip_token_correctness),
         )
     summary = summarize_run(layout.run_dir)
     payload = {
@@ -709,6 +822,40 @@ def _cmd_run_llm(args: argparse.Namespace) -> int:
         payload["project_cast_selection_policy"] = manifest.kf_settings.get("project_cast_selection_policy")
         payload["project_selected_kernel_map"] = manifest.kf_settings.get("project_selected_kernel_map", {})
         payload["project_export_paper_eligible"] = manifest.kf_settings.get("project_export_paper_eligible")
+    print(json.dumps(payload, indent=2))
+    if args.fail_if_not_paper_eligible and not summary.paper_eligible:
+        return 2
+    return 0
+
+
+def _cmd_run_vision(args: argparse.Namespace) -> int:
+    layout, manifest, env_artifact, model_spec, suite, requested_variants = _prepare_vision_run_context(args, materialize_run_dir=True)
+    assert layout is not None
+    common_fields = manifest.model_dump(
+        mode="json",
+        exclude={"artifact_type", "run_dir", "variants_requested", "stages_requested", "description"},
+    )
+    for requested_variant in requested_variants:
+        run_vision_benchmark(
+            layout=layout,
+            common_fields=common_fields,
+            env_artifact=env_artifact,
+            manifest_artifact=manifest,
+            model_spec=model_spec,
+            suite=suite,
+            variant=requested_variant,
+            max_images=args.max_images,
+            full_workload=bool(args.full_workload),
+        )
+    summary = summarize_run(layout.run_dir)
+    payload = {
+        "ok": not args.fail_if_not_paper_eligible or summary.paper_eligible,
+        "run_dir": str(layout.run_dir),
+        "summary_rows": len(summary.rows),
+        "compile_settings": dict(manifest.compile_settings),
+        "paper_eligible": summary.paper_eligible,
+        "paper_eligibility_issues": summary.paper_eligibility_issues,
+    }
     print(json.dumps(payload, indent=2))
     if args.fail_if_not_paper_eligible and not summary.paper_eligible:
         return 2
@@ -987,6 +1134,8 @@ def main() -> int:
             return _cmd_preflight(args)
         if args.command == "run-llm":
             return _cmd_run_llm(args)
+        if args.command == "run-vision":
+            return _cmd_run_vision(args)
         if args.command == "run-ops":
             return _cmd_run_ops(args)
         if args.command == "validate-artifact":

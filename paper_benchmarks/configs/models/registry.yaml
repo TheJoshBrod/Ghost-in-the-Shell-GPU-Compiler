@@ -88,3 +88,21 @@ models:
     notes:
       - Default registry entry for exploratory Gemma int4 smoke.
       - Full-forged Gemma int4 remains exploratory until the linear blocker is fixed.
+
+  - model_id: resnet50_imagenet1k_fp16
+    loader_kind: kf_project_model
+    model_path: ../../../kernels/projects/resnet50-imagenet1k-fp16-gb10/model.py
+    model_config_path: ../../../kernels/projects/resnet50-imagenet1k-fp16-gb10/config.json
+    cast_package_path: ../../../kernels/projects/resnet50-imagenet1k-fp16-gb10/exports/resnet50_imagenet1k_fp16__opt05__mixed_forge.cast
+    torch_dtype: fp16
+    quantization: fp16
+    device: cuda
+    task_type: image_classification
+    category: Conv/vision model
+    validation_suite_path: ../suites/resnet50_imagenet_val.yaml
+    model_license: BSD-3-Clause
+    model_access_terms: TorchVision ResNet-50 architecture and weight metadata; ImageNet-trained weights must be used according to ImageNet terms.
+    paper_eligible: false
+    notes:
+      - Default registry entry for ResNet-50 ImageNet external benchmark.
+      - Pass a specific CAST path with --cast-package for each budget/policy run.

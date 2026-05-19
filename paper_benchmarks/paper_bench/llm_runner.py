@@ -357,6 +357,16 @@ def _tokenize_prompt_batch(
     return batch, float(elapsed_ms if measure_timing else 0.0)
 
 
+def _load_tokenizer_only(model_spec):
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        model_spec.tokenizer_path or model_spec.model_path,
+        local_files_only=bool(getattr(model_spec, "local_files_only", True)),
+        trust_remote_code=model_spec.trust_remote_code,
+    )
+
+
 def _tokenizer_output_devices(tokenized: dict[str, Any]) -> dict[str, str]:
     return {
         str(key): str(value.device)
@@ -1078,6 +1088,7 @@ def run_llm_benchmark(
     store_prompts: bool = False,
     reuse_cache: bool = False,
     cache_search_root: str | Path | None = None,
+    skip_token_correctness: bool = False,
 ) -> RunLayout:
     prompt_suite = load_prompt_records(suite.workload_path)
     compile_settings = compile_settings_from_dict(common_fields.get("compile_settings"))
@@ -1129,7 +1140,11 @@ def run_llm_benchmark(
             device=device,
             settings=kf_settings,
         )
-        reference_model, tokenizer, _ = model_loader(model_spec, device=device)
+        if skip_token_correctness:
+            tokenizer = _load_tokenizer_only(model_spec)
+            reference_model = None
+        else:
+            reference_model, tokenizer, _ = model_loader(model_spec, device=device)
         load_ms = float(runtime_meta.get("load_time_ms", 0.0))
         compile_time_ms = (
             float(runtime_meta.get("jit_compile_time_ms", 0.0))
@@ -1157,14 +1172,21 @@ def run_llm_benchmark(
             kf_common_settings["project_ref"] = str(cast_manifest.get("project_ref"))
         common["kf_settings"] = kf_common_settings
         reference_status, reference_message = skipped_correctness(
-            "Reference correctness is computed against eager outputs for every timed run."
+            "Token correctness was disabled for this benchmark-only run."
+            if skip_token_correctness
+            else "Reference correctness is computed against eager outputs for every timed run."
         )
     else:
         model, tokenizer, load_ms = model_loader(model_spec, device=device)
-        reference_status, reference_message = reference_correctness() if variant == Variant.eager else skipped_correctness(
-            "Reference correctness is computed against eager outputs for every timed run."
-        )
-        if variant == Variant.torch_compile:
+        if skip_token_correctness:
+            reference_status, reference_message = skipped_correctness(
+                "Token correctness was disabled for this benchmark-only run."
+            )
+        else:
+            reference_status, reference_message = reference_correctness() if variant == Variant.eager else skipped_correctness(
+                "Reference correctness is computed against eager outputs for every timed run."
+            )
+        if variant == Variant.torch_compile and not skip_token_correctness:
             reference_model = model
 
     runtime_input_device = _resolve_input_device(model, device)
@@ -1984,8 +2006,9 @@ def run_llm_benchmark(
         )
         total_details = _build_stage_details(Stage.total_generate, total_records, generation_config, extra=dict(slice_details))
         correctness_evidence = {
-            "per_run_output_hash_verification": True,
+            "per_run_output_hash_verification": not skip_token_correctness,
             "correctness_checked_run_count": len(total_records),
+            "token_correctness_skipped": bool(skip_token_correctness),
         }
         prefill_details.update(correctness_evidence)
         decode_details.update(correctness_evidence)

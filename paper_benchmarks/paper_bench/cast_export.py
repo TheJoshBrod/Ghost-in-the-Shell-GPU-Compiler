@@ -22,6 +22,9 @@ from .cast_selection import (
 from .provenance import collect_git_info, safe_sha256_path
 
 
+POLICY_TRACE_WEIGHTED_FASTEST_VALID = "trace_weighted_fastest_valid"
+
+
 class CastExportPlanError(RuntimeError):
     pass
 
@@ -158,16 +161,18 @@ def resolve_cast_export_plan(
     project_ref: str | None = None,
     selection_policy: str = POLICY_AUTO_BEST_FASTEST_VALID,
     selected_kernels: dict[str, str] | None = None,
+    selected_kernel_metadata_overrides: dict[str, dict[str, Any]] | None = None,
     allow_operator_only: bool = True,
     allow_micro_only: bool = False,
     unsafe_override: bool = False,
     allow_native_package: bool = False,
     repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    if selection_policy != POLICY_AUTO_BEST_FASTEST_VALID:
+    allowed_policies = {POLICY_AUTO_BEST_FASTEST_VALID, POLICY_TRACE_WEIGHTED_FASTEST_VALID}
+    if selection_policy not in allowed_policies:
         raise CastExportPlanError(
             f"Unsupported selection policy {selection_policy!r}. "
-            f"Expected {POLICY_AUTO_BEST_FASTEST_VALID!r}."
+            f"Expected one of {sorted(allowed_policies)!r}."
         )
 
     root = Path(project_root).expanduser().resolve()
@@ -188,7 +193,11 @@ def resolve_cast_export_plan(
     skipped_ops: dict[str, dict[str, Any]] = {}
     rejected_summary = _rejection_summary(selection_report.get("rejected_candidates", {}))
 
-    auto_selected = selection_report.get("selected_ops", {})
+    auto_selected = (
+        selection_report.get("selected_ops", {})
+        if selection_policy == POLICY_AUTO_BEST_FASTEST_VALID
+        else {}
+    )
     for op_name, entry in sorted(auto_selected.items()):
         if not isinstance(entry, dict):
             continue
@@ -249,6 +258,11 @@ def resolve_cast_export_plan(
         )
         skipped_ops.pop(op_name, None)
 
+    for op_name, override in sorted((selected_kernel_metadata_overrides or {}).items()):
+        if op_name not in selected_ops or not isinstance(override, dict):
+            continue
+        selected_ops[op_name].update(dict(override))
+
     selected_op_list = sorted(selected_ops)
     exportable = bool(selected_op_list) or allow_native_package
     export_paper_eligible = (
@@ -298,7 +312,7 @@ def resolve_cast_export_plan(
 
     if not exportable:
         raise NoEligibleCastKernelsError(
-            "No kernels satisfied auto_best_fastest_valid. Review rejected candidates.",
+            f"No kernels satisfied {selection_policy}. Review rejected candidates.",
             report=plan,
         )
 
@@ -326,6 +340,17 @@ def build_cast_manifest_metadata(export_plan: dict[str, Any]) -> dict[str, Any]:
             "evidence_tier": entry.get("evidence_tier"),
             "selection_reason": entry.get("selection_reason"),
             "kernel_abi": entry.get("kernel_abi"),
+            "trace_weighted_replay": entry.get("trace_weighted_replay"),
+            "trace_calls": entry.get("trace_calls"),
+            "unique_cases": entry.get("unique_cases"),
+            "runtime_responsibility": entry.get("runtime_responsibility"),
+            "eager_weighted_ms": entry.get("eager_weighted_ms"),
+            "forge_weighted_ms": entry.get("forge_weighted_ms"),
+            "speedup_vs_eager": entry.get("speedup_vs_eager"),
+            "real_cuda": entry.get("real_cuda"),
+            "kernel_status": entry.get("kernel_status"),
+            "replay_artifact": entry.get("replay_artifact"),
+            "replay_artifact_sha256": entry.get("replay_artifact_sha256"),
         }
 
     return {
@@ -521,6 +546,7 @@ def export_cast_package(
     export_plan: dict[str, Any] | None = None,
     selection_policy: str = POLICY_AUTO_BEST_FASTEST_VALID,
     selected_kernels: dict[str, str] | None = None,
+    selected_kernel_metadata_overrides: dict[str, dict[str, Any]] | None = None,
     allow_operator_only: bool = True,
     allow_micro_only: bool = False,
     unsafe_override: bool = False,
@@ -535,6 +561,7 @@ def export_cast_package(
         project_ref=project_ref,
         selection_policy=selection_policy,
         selected_kernels=selected_kernels,
+        selected_kernel_metadata_overrides=selected_kernel_metadata_overrides,
         allow_operator_only=allow_operator_only,
         allow_micro_only=allow_micro_only,
         unsafe_override=unsafe_override,
@@ -550,7 +577,7 @@ def export_cast_package(
     }
     if not kernel_map and not allow_native_package:
         raise NoEligibleCastKernelsError(
-            "No kernels satisfied auto_best_fastest_valid. Review rejected candidates.",
+            f"No kernels satisfied {plan.get('selection_policy', selection_policy)}. Review rejected candidates.",
             report=plan,
         )
 

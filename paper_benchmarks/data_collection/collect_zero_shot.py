@@ -17,6 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from paper_benchmarks.paper_bench.cast_export import (
+    POLICY_TRACE_WEIGHTED_FASTEST_VALID,
     export_cast_package,
     inspect_cast_package,
 )
@@ -110,6 +111,15 @@ def file_ref(path: Path, *, root: Path) -> dict[str, Any]:
         ),
         "sha256": sha256_path(path) if exists and path.is_file() else None,
     }
+
+
+def float_or_none(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def run_git(args: list[str], *, root: Path) -> Any:
@@ -305,14 +315,20 @@ def llm_usage_summary(
 
 def arm_usage_filter(arm: str) -> Any:
     if arm == "zero_shot":
-        return lambda row: str(row.get("job_key") or "") == "generate"
+        return lambda row: (
+            str(row.get("job_key") or "") == "generate"
+            or str(row.get("step_type") or "") == "generate"
+        )
 
     match = re.fullmatch(r"optimize_(\d+)", arm)
     if match:
         max_iteration = int(match.group(1))
 
         def _filter(row: dict[str, Any]) -> bool:
-            if str(row.get("job_key") or "") != "optimize":
+            if (
+                str(row.get("job_key") or "") != "optimize"
+                and str(row.get("step_type") or "") != "optimize"
+            ):
                 return False
             iteration = row.get("iteration")
             try:
@@ -578,11 +594,15 @@ def export_variant(
     output_path: Path,
     variant: str,
     selected_kernels: dict[str, str] | None,
+    selected_kernel_metadata_overrides: dict[str, dict[str, Any]] | None = None,
+    selection_policy: str | None = None,
     allow_native_package: bool,
 ) -> dict[str, Any]:
     result = export_cast_package(
         project_dir,
+        selection_policy=selection_policy or "auto_best_fastest_valid",
         selected_kernels=selected_kernels or {},
+        selected_kernel_metadata_overrides=selected_kernel_metadata_overrides,
         allow_operator_only=True,
         allow_micro_only=False,
         unsafe_override=False,
@@ -599,6 +619,170 @@ def export_variant(
             "cast_file": file_ref(output_path, root=root),
         }
     )
+
+
+def trace_weighted_replay_path(*, root: Path, project_name: str, arm: str) -> Path:
+    return (
+        root
+        / "paper_benchmarks"
+        / "runs"
+        / "trace_weighted_unique_replay"
+        / project_name
+        / arm
+        / f"{arm}_trace_weighted.json"
+    )
+
+
+def trace_weighted_mixed_selection(
+    *,
+    root: Path,
+    project_dir: Path,
+    arm: str,
+) -> dict[str, Any]:
+    replay_path = trace_weighted_replay_path(root=root, project_name=project_dir.name, arm=arm)
+    base_result: dict[str, Any] = {
+        "policy": POLICY_TRACE_WEIGHTED_FASTEST_VALID,
+        "replay_artifact": file_ref(replay_path, root=root),
+        "available": False,
+        "selected_kernel_map": {},
+        "selected_kernel_metadata_overrides": {},
+        "selected_ops": [],
+        "op_decisions": [],
+        "errors": [],
+    }
+    if not replay_path.exists():
+        base_result["reason"] = "trace-weighted replay artifact not found"
+        return base_result
+
+    replay = read_json(replay_path)
+    if not isinstance(replay, dict):
+        base_result["reason"] = "trace-weighted replay artifact is not a JSON object"
+        return base_result
+
+    errors = replay.get("errors") if isinstance(replay.get("errors"), list) else []
+    if errors:
+        base_result["reason"] = "trace-weighted replay artifact has errors"
+        base_result["errors"] = [str(error) for error in errors]
+        return base_result
+
+    if str(replay.get("project") or project_dir.name) != project_dir.name:
+        base_result["reason"] = "trace-weighted replay project does not match export project"
+        return base_result
+    if str(replay.get("arm") or arm) != arm:
+        base_result["reason"] = "trace-weighted replay arm does not match export arm"
+        return base_result
+
+    rows = replay.get("op_rows")
+    if not isinstance(rows, list):
+        base_result["reason"] = "trace-weighted replay artifact has no op_rows list"
+        return base_result
+
+    replay_mtime = replay_path.stat().st_mtime
+    replay_sha256 = sha256_path(replay_path)
+    selected_kernel_map: dict[str, str] = {}
+    selected_metadata: dict[str, dict[str, Any]] = {}
+    op_decisions: list[dict[str, Any]] = []
+
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        op_name = normalize_op_name(str(raw_row.get("op") or ""))
+        speedup = float_or_none(raw_row.get("speedup_vs_eager"))
+        eager_ms = float_or_none(raw_row.get("eager_weighted_ms"))
+        forge_ms = float_or_none(raw_row.get("forge_weighted_ms"))
+        runtime_responsibility = float_or_none(raw_row.get("runtime_responsibility"))
+        selected_kernel = str(raw_row.get("selected_kernel") or "").strip()
+        kernel_path = Path(selected_kernel).expanduser() if selected_kernel else None
+        if kernel_path is not None and not kernel_path.is_absolute():
+            kernel_path = (root / kernel_path).resolve(strict=False)
+
+        reasons: list[str] = []
+        if not op_name:
+            reasons.append("missing op name")
+        if raw_row.get("kernel_status") != "ok":
+            reasons.append(f"kernel_status is {raw_row.get('kernel_status')!r}")
+        if raw_row.get("real_cuda") != "yes":
+            reasons.append(f"real_cuda is {raw_row.get('real_cuda')!r}")
+        if speedup is None or speedup <= 1.0:
+            reasons.append("trace-weighted Forge speedup is not > 1.0")
+        if eager_ms is None or eager_ms <= 0.0:
+            reasons.append("missing eager weighted time")
+        if forge_ms is None or forge_ms <= 0.0:
+            reasons.append("missing Forge weighted time")
+        if kernel_path is None or not kernel_path.exists():
+            reasons.append("selected kernel source missing")
+        elif kernel_path.stat().st_mtime > replay_mtime + 1.0:
+            reasons.append("selected kernel source is newer than replay artifact")
+
+        selected = not reasons
+        decision = {
+            "op": op_name,
+            "selected": selected,
+            "reasons": reasons,
+            "speedup_vs_eager": speedup,
+            "eager_weighted_ms": eager_ms,
+            "forge_weighted_ms": forge_ms,
+            "runtime_responsibility": runtime_responsibility,
+            "trace_calls": raw_row.get("trace_calls"),
+            "unique_cases": raw_row.get("unique_cases"),
+            "real_cuda": raw_row.get("real_cuda"),
+            "kernel_status": raw_row.get("kernel_status"),
+            "selected_kernel": str(kernel_path) if kernel_path is not None else "",
+        }
+        op_decisions.append(decision)
+        if not selected or kernel_path is None:
+            continue
+
+        selected_kernel_map[op_name] = str(kernel_path)
+        selected_metadata[op_name] = {
+            "candidate_id": f"{op_name}:trace_weighted_replay",
+            "evidence_tier": "trace_weighted_replay",
+            "paper_eligible": False,
+            "selection_reason": (
+                f"{POLICY_TRACE_WEIGHTED_FASTEST_VALID}: selected because trace-weighted "
+                f"Forge speedup {speedup:.6f}x is > 1.0x"
+            ),
+            "trace_weighted_replay": {
+                "formula": replay.get("formula"),
+                "project": replay.get("project"),
+                "arm": replay.get("arm"),
+                "op": op_name,
+                "eager_weighted_ms": eager_ms,
+                "forge_weighted_ms": forge_ms,
+                "speedup_vs_eager": speedup,
+                "runtime_responsibility": runtime_responsibility,
+                "trace_calls": raw_row.get("trace_calls"),
+                "unique_cases": raw_row.get("unique_cases"),
+                "weighted_eager_avg_ms_per_call": raw_row.get("weighted_eager_avg_ms_per_call"),
+                "weighted_forge_avg_ms_per_call": raw_row.get("weighted_forge_avg_ms_per_call"),
+                "real_cuda": raw_row.get("real_cuda"),
+                "kernel_status": raw_row.get("kernel_status"),
+                "replay_artifact": file_ref(replay_path, root=root),
+                "replay_artifact_sha256": replay_sha256,
+            },
+            "trace_calls": raw_row.get("trace_calls"),
+            "unique_cases": raw_row.get("unique_cases"),
+            "runtime_responsibility": runtime_responsibility,
+            "eager_weighted_ms": eager_ms,
+            "forge_weighted_ms": forge_ms,
+            "speedup_vs_eager": speedup,
+            "real_cuda": raw_row.get("real_cuda"),
+            "kernel_status": raw_row.get("kernel_status"),
+            "replay_artifact": file_ref(replay_path, root=root),
+            "replay_artifact_sha256": replay_sha256,
+        }
+
+    base_result.update(
+        {
+            "available": True,
+            "reason": "trace-weighted replay artifact applied",
+            "selected_kernel_map": selected_kernel_map,
+            "selected_kernel_metadata_overrides": selected_metadata,
+            "selected_ops": sorted(selected_kernel_map),
+            "op_decisions": op_decisions,
+        }
+    )
+    return base_result
 
 
 def dispatch_table(*, profiled: list[str], export_record: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -726,6 +910,16 @@ def collect(args: argparse.Namespace) -> Path:
         project_dir / "llm_usage.db",
         row_filter=arm_usage_filter(arm),
     )
+    trace_weighted_selection = trace_weighted_mixed_selection(
+        root=root,
+        project_dir=project_dir,
+        arm=arm,
+    )
+    trace_weighted_replay_ref = trace_weighted_selection.get("replay_artifact")
+    if isinstance(trace_weighted_replay_ref, dict) and trace_weighted_replay_ref.get("exists"):
+        replay_source = Path(str(trace_weighted_replay_ref.get("path")))
+        if replay_source.exists():
+            source_paths.append(replay_source)
 
     full_export = export_variant(
         project_dir=project_dir,
@@ -740,7 +934,21 @@ def collect(args: argparse.Namespace) -> Path:
         root=root,
         output_path=artifact_dir / f"{model_slug}__{arm}__mixed_forge.cast",
         variant="mixed_forge",
-        selected_kernels=None,
+        selected_kernels=(
+            trace_weighted_selection.get("selected_kernel_map", {})
+            if trace_weighted_selection.get("available")
+            else None
+        ),
+        selected_kernel_metadata_overrides=(
+            trace_weighted_selection.get("selected_kernel_metadata_overrides", {})
+            if trace_weighted_selection.get("available")
+            else None
+        ),
+        selection_policy=(
+            POLICY_TRACE_WEIGHTED_FASTEST_VALID
+            if trace_weighted_selection.get("available")
+            else None
+        ),
         allow_native_package=True,
     )
 
@@ -886,6 +1094,7 @@ def collect(args: argparse.Namespace) -> Path:
                 "missing_full_forge_ops": missing_full_forge_ops,
                 "full_forge_cast": full_export["cast_file"],
                 "mixed_forge_cast": mixed_export["cast_file"],
+                "trace_weighted_mixed_selection": trace_weighted_selection,
                 "exports_differ": exports_differ,
                 "full_forge_dispatch_by_profiled_op": full_dispatch,
                 "mixed_forge_dispatch_by_profiled_op": mixed_dispatch,
@@ -907,6 +1116,7 @@ def collect(args: argparse.Namespace) -> Path:
                     "records_appended": len(records),
                     "full_forge_cast": full_export["cast_file"],
                     "mixed_forge_cast": mixed_export["cast_file"],
+                    "trace_weighted_mixed_selection": trace_weighted_selection,
                     "exports_differ": exports_differ,
                     "llm_usage_summary": project_llm_usage_summary,
                     "arm_llm_usage_summary": arm_llm_usage_summary,

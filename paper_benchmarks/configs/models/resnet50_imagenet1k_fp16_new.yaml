@@ -1,0 +1,38 @@
+model_id: resnet50_imagenet1k_fp16_new
+category: Conv/vision model
+loader_kind: kf_project_model
+model_path: ../../../kernels/projects/resnet50-imagenet1k-fp16-gb10-new/model.py
+model_config_path: ../../../kernels/projects/resnet50-imagenet1k-fp16-gb10-new/config.json
+cast_package_path: ../../../kernels/projects/resnet50-imagenet1k-fp16-gb10-new/exports/resnet50_imagenet1k_fp16_new__opt20__mixed_forge.cast
+deployment_artifact_path: ../../../kernels/projects/resnet50-imagenet1k-fp16-gb10-new/exports/resnet50_imagenet1k_fp16_new__opt20__mixed_forge.cast
+task_type: image_classification
+torch_dtype: fp16
+quantization: fp16
+device: cuda
+model_license: BSD-3-Clause
+model_access_terms: TorchVision ResNet-50 architecture and weight metadata; ImageNet-trained weights must be used according to ImageNet terms.
+validation_suite_path: ../suites/resnet50_imagenetv2_matched_frequency.yaml
+workload_hash:
+batch_sizes:
+  - 1
+  - 32
+shape_or_length_buckets:
+  - bucket_id: image_224
+    image_size: 224
+correctness_comparator: logits_allclose_and_top1_exact_against_eager
+baselines_required:
+  - eager
+  - torch_compile
+  - kf_cast
+compile_settings:
+  backend: inductor
+  fullgraph: false
+  dynamic: false
+expected_memory_footprint_notes:
+  - Record activation memory and cuDNN workspace behavior for batch 1 and batch 32.
+paper_eligible: false
+benchmark_expectation: negative_or_neutral_control
+notes:
+  - New ResNet-50 project for unique-kernel-case profiling and trace-weighted replay.
+  - Uses the local ImageNetV2 matched-frequency manifest because that is the dataset used by the existing ResNet evidence package in this workspace.
+  - Pass a specific CAST path with --cast-package for each zero_shot, opt05, opt10, or opt20 run.

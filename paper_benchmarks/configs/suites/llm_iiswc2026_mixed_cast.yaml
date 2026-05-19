@@ -1,0 +1,55 @@
+suite_id: llm_iiswc2026_mixed_cast
+benchmark_mode: e2e_model
+description: IISWC 2026 candidate end-to-end causal LM suite for mixed CAST export evaluation.
+prompt_file: /home/gb10/Projects/Kernal-Forge/CGinS/paper_benchmarks/workloads/qwen35a3b/qwen_paper_prompts_v1.jsonl
+workload_slug: qwen_paper_prompts_v1_iiswc2026_16x3
+dataset_access_terms: public prompt pack manifest; dataset licenses/provenance must be verified before paper-eligible promotion
+workload_type: prompt_records
+synthetic_workload: false
+variants:
+  - eager
+  - torch_compile
+  - kf_cast
+stages:
+  - load
+  - compile
+  - warmup
+  - prefill
+  - decode
+  - total_generate
+prompt_length_buckets:
+  - bucket_id: short
+    min_tokens: 1
+    max_tokens: 128
+  - bucket_id: medium
+    min_tokens: 129
+    max_tokens: 512
+  - bucket_id: long
+    min_tokens: 513
+    max_tokens: 1024
+shape_or_length_buckets:
+  - bucket_id: short
+    min_tokens: 1
+    max_tokens: 128
+  - bucket_id: medium
+    min_tokens: 129
+    max_tokens: 512
+  - bucket_id: long
+    min_tokens: 513
+    max_tokens: 1024
+batch_sizes:
+  - 1
+max_new_tokens: 128
+warmup_runs: 5
+timed_runs: 16
+generation_mode: greedy
+cache_mode: kv_cache_on
+random_seed: 0
+include_tokenization_in_timing: false
+measure_prefill_decode_separately: true
+device: cuda
+notes:
+  - Uses the frozen external Qwen/Gemma prompt pack in stable source order.
+  - timed_runs is 16 because Gemma tokenization places only 16 prompts in the long bucket under the shared 513-1024 token range.
+  - Batch size 1, greedy decoding, 128 generated tokens, and KV cache enabled are the paper-default settings for this suite.
+  - Correctness for separate-process runs is checked offline by exact output-token-hash comparison against the eager run.

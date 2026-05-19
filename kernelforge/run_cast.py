@@ -459,16 +459,26 @@ def _resolve_max_pool2d_launch_args(args: tuple[Any, ...], kwargs: dict[str, Any
     if return_indices:
         return {"fallback_reason": "max_pool2d_return_indices_unsupported"}
 
+    resolved_launch = {
+        "input": resolved["input"],
+        "kernel_size": kernel_size,
+        "stride": stride,
+        "padding": padding,
+        "dilation": dilation,
+        "ceil_mode": ceil_mode,
+        "return_indices": return_indices,
+    }
     return {
         "ordered": [
-            resolved["input"],
-            kernel_size,
-            stride,
-            padding,
-            dilation,
-            ceil_mode,
-            return_indices,
+            resolved_launch["input"],
+            resolved_launch["kernel_size"],
+            resolved_launch["stride"],
+            resolved_launch["padding"],
+            resolved_launch["dilation"],
+            resolved_launch["ceil_mode"],
+            resolved_launch["return_indices"],
         ],
+        "resolved": resolved_launch,
     }
 
 
@@ -480,6 +490,35 @@ def _complete_functional_launch_args(
     kwargs: dict[str, Any],
     n_launch: int | None,
 ) -> list[Any]:
+    def _pool_scalar(value: Any, default: Any = None) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return default
+            first = value[0]
+            if any(item != first for item in value):
+                return value
+            return first
+        return value
+
+    if op_name == "torch_nn_functional_max_pool2d":
+        input_arg = resolved_args.get("input", call_args[0] if call_args else None)
+        kernel_size = resolved_args.get("kernel_size", call_args[1] if len(call_args) > 1 else None)
+        stride = resolved_args.get("stride", kwargs.get("stride", None))
+        padding = resolved_args.get("padding", kwargs.get("padding", 0))
+        dilation = resolved_args.get("dilation", kwargs.get("dilation", 1))
+        ceil_mode = resolved_args.get("ceil_mode", kwargs.get("ceil_mode", False))
+        return_indices = resolved_args.get("return_indices", kwargs.get("return_indices", False))
+        kernel_size = _pool_scalar(kernel_size)
+        stride = _pool_scalar(stride, kernel_size)
+        padding = _pool_scalar(padding, 0)
+        dilation = _pool_scalar(dilation, 1)
+        completed = [input_arg, kernel_size, stride, padding, dilation, bool(ceil_mode), bool(return_indices)]
+        if any(isinstance(value, (list, tuple)) for value in completed[1:5]):
+            return call_args
+        return completed[:n_launch] if n_launch is not None else completed
+
     if op_name == "torch_nn_functional_softmax":
         completed = list(call_args)
         dim = resolved_args.get("dim", kwargs.get("dim"))
@@ -529,7 +568,7 @@ def _build_functional_patch(
                     _record_fallback(runtime_stats, op_name, str(fallback_reason))
                     return orig_fn(*args, **kwargs)
                 ordered = list(max_pool_resolved["ordered"])
-                resolved = {}
+                resolved = dict(max_pool_resolved["resolved"])
                 _increment_stat(runtime_stats, "adaptation_count")
                 _increment_stat(op_stats, "adaptation_count")
             elif orig_params is not None:
