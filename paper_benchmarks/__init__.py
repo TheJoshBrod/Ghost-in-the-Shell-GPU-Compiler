@@ -1,2 +1,0 @@
-"""Paper benchmark harness package."""
-
