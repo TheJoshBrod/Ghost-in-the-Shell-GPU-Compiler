@@ -40,6 +40,21 @@ Kernel Forge automatically generates and optimizes GPU kernels for PyTorch model
 
 [Full feature details](docs/features.md)
 
+---
+
+## Benchmark Snapshot
+
+The arXiv evaluation reports opt50 operator-level results on four real PyTorch workloads running on an NVIDIA DGX Spark with GB10 GPU. The most favorable generated-kernel wins are measured against the PyTorch eager path for the same captured operator inputs.
+
+<p align="center">
+  <img src="docs/benchmarks/kernel_forge_opt50_best_speedups.png" alt="Best Kernel Forge opt50 generated-kernel speedups" width="49%"/>
+  <img src="docs/benchmarks/kernel_forge_opt50_operator_wins.png" alt="Kernel Forge opt50 generated operator wins by workload" width="49%"/>
+</p>
+
+- Best generated-kernel wins: `2.83x` on Gemma 4 E2B softmax, `1.70x` on Stable Diffusion 3.5 Medium group normalization, `1.54x` on Qwen 3.5 35B-A3B softmax, and `1.52x` on ResNet-50 adaptive average pooling.
+- Across ResNet-50, Stable Diffusion 3.5 Medium, Gemma 4 E2B, and Qwen 3.5 35B-A3B, 14 generated operator candidates outperform PyTorch eager at opt50.
+- Kernel Forge uses guarded dispatch: generated kernels are selected only where they improve measured operator latency, while PyTorch eager is preserved for stronger framework or vendor-backed paths.
+
 ## Quick start
 
 See [system requirements](docs/requirements.md) before installing.
