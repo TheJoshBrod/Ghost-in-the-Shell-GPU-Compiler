@@ -3,6 +3,8 @@ src/optimizer/components/llm/prompts.py
 Generates prompts for LLM systems including "sys_prompt" AND iterative refinement "gpu_optimization" prompt.
 """
 
+from src.optimizer import quantized
+
 
 def get_sys_prompt() -> str:
     return """
@@ -430,6 +432,7 @@ def generate_new_root_prompt(
     # Format operator specification
     func_name = operator_spec.get('function_name', 'unknown_operator')
     params = operator_spec.get('parameters', [])
+    kernel_abi = operator_spec.get("kernel_abi") or {}
     
     params_section = ""
     for i, param in enumerate(params, 1):
@@ -438,6 +441,29 @@ def generate_new_root_prompt(
             params_section += f"\n   - Shape: {param['shape']}"
         if 'description' in param:
             params_section += f"\n   - {param['description']}"
+        if param.get("quantized_storage"):
+            storage = param["quantized_storage"][0]
+            params_section += f"\n   - Quantized storage ABI: {storage.get('kernel_abi')}"
+            params_section += f"\n   - Packed wrapper `_data`: dtype {storage.get('packed_wrapper', {}).get('dtype')}, shape {storage.get('packed_wrapper', {}).get('shape')}, stride {storage.get('packed_wrapper', {}).get('stride')}"
+            params_section += f"\n   - Raw TinyGemm storage `_data._data`: dtype {storage.get('packed_raw', {}).get('dtype')}, shape {storage.get('packed_raw', {}).get('shape')}, stride {storage.get('packed_raw', {}).get('stride')}"
+            params_section += f"\n   - Packed layout: {storage.get('packed_layout')}"
+            params_section += f"\n   - Scale/shift `_scale_shift`: dtype {storage.get('scale_shift', {}).get('dtype')}, shape {storage.get('scale_shift', {}).get('shape')}, stride {storage.get('scale_shift', {}).get('stride')}"
+
+    special_abi_section = ""
+    if kernel_abi.get("name") == quantized.TINY_GEMM_LINEAR_ABI:
+        special_abi_section = f"""
+## Kernel Forge Special ABI
+
+This operator uses TinyGemm/Quanto INT4 packed linear weights. Generated CUDA MUST use this internal launch signature:
+
+```cpp
+{kernel_abi.get('launch_signature', quantized.TINY_GEMM_LINEAR_SIGNATURE)}
+```
+
+Do not generate a dense `linear(input, weight, bias)` wrapper. The verifier/profiler move the Quanto `weight._data` wrapper first, then pass raw TinyGemm storage as `packed_weight_raw` and `weight._scale_shift` as `scale_shift`.
+
+`packed_weight_raw` is PyTorch TinyGemm-private storage for `torch._weight_int4pack_mm`; it is not row-major low/high nibbles. Use `at::_ops::_weight_int4pack_mm::call(input.reshape({{-1, in_features}}), packed_weight_raw, group_size, scale_shift)` (include `<ATen/ops/_weight_int4pack_mm.h>`) or an equivalent TinyGemm-aware path, then reshape and add `bias` if present.
+"""
     
     # Format existing roots section (the key for diversity)
     if existing_roots:
@@ -495,6 +521,8 @@ Based on {operator_spec.get('num_calls', 'multiple')} tracked call(s):
 {params_section}
 
 {profiler_section}
+
+{special_abi_section}
 
 {roots_section}
 

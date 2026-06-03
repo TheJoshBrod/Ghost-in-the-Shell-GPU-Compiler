@@ -387,3 +387,6 @@ target/
 
 kernels/projects
 model/
+
+# Local benchmark workspace and generated paper artifacts
+paper_benchmarks/

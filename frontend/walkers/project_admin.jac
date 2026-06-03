@@ -29,6 +29,7 @@ import from .job_supervisor {
     _get_active_project_job,
     _queue_has_backlog,
     _queue_has_running_work,
+    _reconcile_queue_with_state,
     _start_job,
     _find_optimized_dir,
     _normalize_metric_op_name,
@@ -634,34 +635,32 @@ walker:pub GetProjectOps {
                 }
             }
 
-            if len(ops_map) == 0 {
-                summary_path = path.join(
-                    _project_dir(self.projectName), "io", "summary.json"
-                );
-                if path.exists(summary_path) {
-                    try {
-                        with open(summary_path, "r") as f {
-                            summary = load(f);
-                        }
-                        op_counts = summary["op_counts"]
-                        if summary and "op_counts" in summary
-                        else {};
-                        for full_name in op_counts {
-                            op_name = _normalize_metric_op_name(full_name);
-                            if not op_name {
-                                continue;
-                            }
-                            c = op_counts[full_name];
-                            try {
-                                c = int(c);
-                            } except Exception {
-                                c = 0;
-                            }
-                            ops_map[op_name] = c;
-                        }
-                    } except Exception as e {
-                        print(f"Error reading summary for ops: {e}");
+            summary_path = path.join(
+                _project_dir(self.projectName), "io", "summary.json"
+            );
+            if path.exists(summary_path) {
+                try {
+                    with open(summary_path, "r") as f {
+                        summary = load(f);
                     }
+                    op_counts = summary["op_counts"]
+                    if summary and "op_counts" in summary
+                    else {};
+                    for full_name in op_counts {
+                        op_name = _normalize_metric_op_name(full_name);
+                        if not op_name {
+                            continue;
+                        }
+                        c = op_counts[full_name];
+                        try {
+                            c = int(c);
+                        } except Exception {
+                            c = 0;
+                        }
+                        ops_map[op_name] = c;
+                    }
+                } except Exception as e {
+                    print(f"Error reading summary for ops: {e}");
                 }
             }
 
@@ -688,7 +687,11 @@ walker:pub GetProjectOps {
                         if not op_name {
                             continue;
                         }
-                        ms_val = r["pytorch_ms"] if "pytorch_ms" in r and r["pytorch_ms"] is not None else None;
+                        ms_val = (
+                            r["weighted_pytorch_ms"]
+                            if "weighted_pytorch_ms" in r and r["weighted_pytorch_ms"] is not None
+                            else (r["pytorch_ms"] if "pytorch_ms" in r and r["pytorch_ms"] is not None else None)
+                        );
                         if ms_val is not None {
                             try {
                                 profile_ms_map[op_name] = float(ms_val);
@@ -724,6 +727,7 @@ walker:pub GetProjectStatus {
         _start_next_queued_job(self.projectName);
         state = _read_state(self.projectName);
         queue_state = _read_queue_state(self.projectName);
+        queue_state = _reconcile_queue_with_state(self.projectName, state, queue_state);
         if (
             not _get_active_project_job(self.projectName, False)
             and _queue_has_backlog(queue_state)
@@ -732,6 +736,7 @@ walker:pub GetProjectStatus {
             _start_next_queued_job(self.projectName);
             state = _read_state(self.projectName);
             queue_state = _read_queue_state(self.projectName);
+            queue_state = _reconcile_queue_with_state(self.projectName, state, queue_state);
         }
         if "active_tasks" in queue_state {
             cleaned = {};

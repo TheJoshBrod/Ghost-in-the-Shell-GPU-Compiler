@@ -3,6 +3,16 @@
 import from react { useState }
 import from ..shared.MetricsAdapter { list_len, to_list }
 
+def _index_list(count: int) -> list {
+    out = [];
+    idx = 0;
+    while idx < count {
+        out.push(idx);
+        idx = idx + 1;
+    }
+    return out;
+}
+
 def:pub OperatorResultsTable(props: any) -> Any {
     operatorRows = props.operatorRows;
     name = props.name;
@@ -114,9 +124,11 @@ def:pub OperatorResultsTable(props: any) -> Any {
         ["w-12", "w-12", "w-12"]
     ];
     skeletonNodes = [];
-    for i in range(3) {
+    row_indices = _index_list(3);
+    col_indices = _index_list(10);
+    for i in row_indices {
         cells = [];
-        for j in range(10) {
+        for j in col_indices {
             bc = " border-l border-[var(--border)] pl-4" if j == 1 or j == 4 or j == 8 else "";
             cells.push(<td key={j} className={"py-3 px-4" + bc}><div className={"skeleton skeleton-line " + skeleton_widths[j][i]}></div></td>);
         }
@@ -158,6 +170,14 @@ def:pub OperatorResultsTable(props: any) -> Any {
 
         r_runtime_pct = r["runtime_pct"] if "runtime_pct" in r else "--";
         r_call_count = r["call_count"] if "call_count" in r else "--";
+        r_timing_source = str(r["timing_source"]) if "timing_source" in r and r["timing_source"] else "";
+        r_metric_arm = str(r["metric_arm"]) if "metric_arm" in r and r["metric_arm"] else "";
+        source_label = "";
+        if r_timing_source == "trace_weighted" {
+            source_label = "trace-weighted" + (f" · {r_metric_arm}" if r_metric_arm else "");
+        } elif r_timing_source {
+            source_label = r_timing_source.replace("_", " ");
+        }
 
         llm_cell_tokens = "--";
         llm_cell_cost = "--";
@@ -178,7 +198,10 @@ def:pub OperatorResultsTable(props: any) -> Any {
             >
                 <td className="py-2.5 px-4 font-mono text-xs text-zinc-200" title={r_name}>{r_short}</td>
                 
-                <td className="py-2.5 px-4 font-mono text-xs text-zinc-400 border-l border-[var(--border)] pl-4 transition-colors">{r_baseline}</td>
+                <td className="py-2.5 px-4 font-mono text-xs text-zinc-400 border-l border-[var(--border)] pl-4 transition-colors">
+                    <div>{r_baseline}</div>
+                    {<div className="text-[10px] text-emerald-300/70 mt-0.5">{source_label}</div> if source_label else <span/>}
+                </td>
                 <td className="py-2.5 px-4 font-mono text-xs text-zinc-400">{r_runtime_pct}</td>
                 <td className="py-2.5 px-4 font-mono text-xs text-zinc-500 pr-4">{r_call_count}</td>
                 
@@ -234,20 +257,20 @@ def:pub OperatorResultsTable(props: any) -> Any {
                                 <div className="flex items-center">Operator {getSortIcon("name")}</div>
                             </th>
                             
-                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="PyTorch baseline execution time" onClick={lambda -> None { handleSort("baseline"); }}>
+                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Trace-weighted PyTorch baseline time per call when available" onClick={lambda -> None { handleSort("baseline"); }}>
                                 <div className="flex items-center">PyTorch Time {getSortIcon("baseline")}</div>
                             </th>
-                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Percentage of total PyTorch execution time" onClick={lambda -> None { handleSort("runtime_pct"); }}>
+                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Percentage of total trace-weighted PyTorch execution time" onClick={lambda -> None { handleSort("runtime_pct"); }}>
                                 <div className="flex items-center">% Run Time {getSortIcon("runtime_pct")}</div>
                             </th>
                             <th className="py-2.5 px-4 font-normal pr-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Number of calls in model" onClick={lambda -> None { handleSort("call_count"); }}>
                                 <div className="flex items-center">Calls {getSortIcon("call_count")}</div>
                             </th>
 
-                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Execution time of the best generated kernel" onClick={lambda -> None { handleSort("best"); }}>
+                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Trace-weighted selected kernel time per call when available" onClick={lambda -> None { handleSort("best"); }}>
                                 <div className="flex items-center">Best Kernel {getSortIcon("best")}</div>
                             </th>
-                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Speedup ratio over PyTorch baseline" onClick={lambda -> None { handleSort("ratio"); }}>
+                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Trace-weighted speedup over PyTorch baseline when available" onClick={lambda -> None { handleSort("ratio"); }}>
                                 <div className="flex items-center">Speedup {getSortIcon("ratio")}</div>
                             </th>
                             <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Current progress of operator generation" onClick={lambda -> None { handleSort("status"); }}>

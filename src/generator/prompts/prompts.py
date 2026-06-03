@@ -1,6 +1,9 @@
 """File to construct and pull prompts."""
+import json
 import os
 import torch
+
+from src.optimizer import quantized
 
 
 def get_system_prompt() -> str:
@@ -103,7 +106,7 @@ def _summarize_scalar(values: list):
 def _tensor_stats(value: torch.Tensor) -> dict:
     target = _target_device()
     device = target or str(value.device)
-    return {
+    stats = {
         "dtype": str(value.dtype),
         "shape": list(value.shape),
         "stride": list(value.stride()),
@@ -112,6 +115,10 @@ def _tensor_stats(value: torch.Tensor) -> dict:
         "requires_grad": bool(value.requires_grad),
         "numel": int(value.numel()),
     }
+    quantized_storage = quantized.describe_tinygemm_qbits_tensor(value)
+    if quantized_storage:
+        stats["quantized_storage"] = quantized_storage
+    return stats
 
 
 def _summarize_value(value):
@@ -135,8 +142,9 @@ def _infer_param_order(call_list):
         sig = call.get("signature", {}) if isinstance(call, dict) else {}
         params = sig.get("params", []) if isinstance(sig, dict) else []
         defaults = sig.get("defaults", {}) if isinstance(sig, dict) else {}
+        kinds = sig.get("kinds", {}) if isinstance(sig, dict) else {}
         if params:
-            return list(params), defaults
+            return list(params), defaults, kinds
     # Fallback: positional args then kwargs in observed order
     if call_list:
         first = call_list[0]
@@ -145,8 +153,30 @@ def _infer_param_order(call_list):
         param_order = [f"arg{i}" for i in range(len(args))]
         if isinstance(kwargs, dict):
             param_order.extend(list(kwargs.keys()))
-        return param_order, {}
-    return [], {}
+        return param_order, {}, {}
+    return [], {}, {}
+
+
+def _is_tensor_type(value_type) -> bool:
+    try:
+        return issubclass(value_type, torch.Tensor)
+    except Exception:
+        return False
+
+
+def _dedupe_dicts(values: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for value in values:
+        try:
+            key = json.dumps(value, sort_keys=True, default=str)
+        except Exception:
+            key = str(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(value)
+    return deduped
 
 
 def generate_function_spec_from_calls(call_list, function_name):
@@ -161,7 +191,7 @@ def generate_function_spec_from_calls(call_list, function_name):
     # We will store observed properties for every argument across all calls
     param_stats = {}
 
-    param_order, defaults = _infer_param_order(call_list)
+    param_order, defaults, kinds = _infer_param_order(call_list)
 
     for call_idx, call in enumerate(call_list):
         # Normalize args to dict keys (arg0, arg1...) to match kwargs
@@ -185,6 +215,7 @@ def generate_function_spec_from_calls(call_list, function_name):
                     "numel": set(),
                     "list_lens": set(),
                     "scalar_values": [],
+                    "quantized_storage": [],
                 }
 
             # Record Type
@@ -201,6 +232,9 @@ def generate_function_spec_from_calls(call_list, function_name):
                 param_stats[name]["contiguous"].add(bool(value.is_contiguous()))
                 param_stats[name]["requires_grad"].add(bool(value.requires_grad))
                 param_stats[name]["numel"].add(int(value.numel()))
+                quantized_storage = quantized.describe_tinygemm_qbits_tensor(value)
+                if quantized_storage:
+                    param_stats[name]["quantized_storage"].append(quantized_storage)
 
             # Record Length (for Lists/Tuples)
             elif isinstance(value, (list, tuple)):
@@ -227,6 +261,7 @@ def generate_function_spec_from_calls(call_list, function_name):
         contiguous = stats["contiguous"]
         requires_grad = stats["requires_grad"]
         numel = stats["numel"]
+        quantized_storage = stats["quantized_storage"]
 
         spec = {
             "name": name,
@@ -234,7 +269,7 @@ def generate_function_spec_from_calls(call_list, function_name):
         }
 
         # --- Logic for Tensors ---
-        if torch.Tensor in types:
+        if shapes or any(_is_tensor_type(value_type) for value_type in types):
             if _target_device() == "triton":
                 spec["type"] = "torch.Tensor"
             else:
@@ -273,6 +308,8 @@ def generate_function_spec_from_calls(call_list, function_name):
             spec["contiguous"] = list(contiguous) if contiguous else []
             spec["requires_grad"] = list(requires_grad) if requires_grad else []
             spec["numel"] = list(numel) if numel else []
+            if quantized_storage:
+                spec["quantized_storage"] = _dedupe_dicts(quantized_storage)
 
         # --- Logic for Lists/Tuples ---
         elif list in types or tuple in types:
@@ -308,15 +345,27 @@ def generate_function_spec_from_calls(call_list, function_name):
 
         param_specs.append(spec)
 
-    return {
+    function_spec = {
         "function_name": function_name,
         "num_calls": len(call_list),
         "parameters": param_specs,
         "signature": {
             "params": param_order,
             "defaults": defaults,
+            "kinds": kinds,
         },
     }
+    for call in call_list:
+        abi = quantized.tinygemm_linear_abi(
+            function_name,
+            call.get("args", []) if isinstance(call, dict) else [],
+            call.get("kwargs", {}) if isinstance(call, dict) else {},
+            call.get("signature", {}) if isinstance(call, dict) else {},
+        )
+        if abi:
+            function_spec["kernel_abi"] = abi
+            break
+    return function_spec
 
 
 def format_operator_prompt(function_spec, profiler_context=None, template: str | None = None):
@@ -338,12 +387,45 @@ Based on {function_spec['num_calls']} tracked call(s), implement this operator.
 
 Signature parameters (exact order): {function_spec['signature']['params']}
 Defaults: {function_spec['signature']['defaults']}
+Parameter kinds: {function_spec['signature'].get('kinds', {})}
 
 **Parameters:**
 """
     target = _target_device()
     if target:
         prompt += f"\nTarget device: {target}\n"
+
+    kernel_abi = function_spec.get("kernel_abi")
+    if kernel_abi and kernel_abi.get("name") == quantized.TINY_GEMM_LINEAR_ABI:
+        weight_abi = kernel_abi.get("weight", {})
+        prompt += f"""
+
+### Kernel Forge Special ABI
+
+This captured `torch.nn.functional.linear` call uses a TinyGemm/Quanto INT4 packed weight tensor subclass. The logical weight dtype is not the storage layout.
+
+Generated CUDA MUST implement this internal Kernel Forge launch signature instead of the public PyTorch `linear(input, weight, bias)` signature:
+
+```cpp
+{kernel_abi.get('launch_signature', quantized.TINY_GEMM_LINEAR_SIGNATURE)}
+```
+
+The verifier, profiler, and CAST runtime adapt the public call to this ABI by moving the Quanto `weight._data` wrapper first, then passing:
+- `input`: original activation tensor
+- `packed_weight_raw`: target-device raw TinyGemm storage from `weight._data._data`, dtype {weight_abi.get('packed_raw', {}).get('dtype', 'unknown')}, shape {weight_abi.get('packed_raw', {}).get('shape', 'unknown')}, stride {weight_abi.get('packed_raw', {}).get('stride', 'unknown')}
+- `scale_shift`: `weight._scale_shift`, dtype {weight_abi.get('scale_shift', {}).get('dtype', 'unknown')}, shape {weight_abi.get('scale_shift', {}).get('shape', 'unknown')}, stride {weight_abi.get('scale_shift', {}).get('stride', 'unknown')}
+- `bias`: original optional bias tensor
+- `out_features`: {weight_abi.get('out_features', 'unknown')}
+- `in_features`: {weight_abi.get('in_features', 'unknown')}
+- `group_size`: {weight_abi.get('group_size', 'unknown')}
+- `axis`: {weight_abi.get('axis', 'unknown')}
+
+Packed layout: {weight_abi.get('packed_layout', quantized.TINY_GEMM_LINEAR_PACKED_LAYOUT)}. The raw tensor is PyTorch TinyGemm-private storage, not row-major low/high nibbles. Do not manually decode `packed_weight_raw` with `& 0x0f` or `>> 4`.
+
+Use `at::_ops::_weight_int4pack_mm::call(input.reshape({{-1, in_features}}), packed_weight_raw, group_size, scale_shift)` (include `<ATen/ops/_weight_int4pack_mm.h>`) or an equivalent TinyGemm-aware path, then reshape to the original input leading dimensions plus `out_features` and add `bias` if present.
+
+Do not read the logical weight as dense BF16 and do not use `weight.data_ptr<...>()`; there is no `weight` argument in this ABI. If you reason about logical unpacked values, the dequantization convention is `{weight_abi.get('logical_unpack_dequant', quantized.TINY_GEMM_LINEAR_DEQUANT_FORMULA)}`.
+"""
 
     # List all parameters
     for i, param in enumerate(function_spec['parameters'], 1):
@@ -356,6 +438,16 @@ Defaults: {function_spec['signature']['defaults']}
             prompt += f"\n   - Contiguous: {param.get('contiguous', [])}"
             prompt += f"\n   - Requires grad: {param.get('requires_grad', [])}"
             prompt += f"\n   - Numel: {param.get('numel', [])}"
+            if param.get("quantized_storage"):
+                storage = param["quantized_storage"][0]
+                prompt += f"\n   - Quantized storage ABI: {storage.get('kernel_abi')}"
+                prompt += f"\n   - Tensor subclass: {storage.get('tensor_subclass')}"
+                prompt += f"\n   - Logical dtype/shape/stride: {storage.get('logical_dtype')}, {storage.get('logical_shape')}, {storage.get('logical_stride')}"
+                prompt += f"\n   - Packed wrapper `_data`: dtype {storage.get('packed_wrapper', {}).get('dtype')}, shape {storage.get('packed_wrapper', {}).get('shape')}, stride {storage.get('packed_wrapper', {}).get('stride')}"
+                prompt += f"\n   - Raw TinyGemm storage `_data._data`: dtype {storage.get('packed_raw', {}).get('dtype')}, shape {storage.get('packed_raw', {}).get('shape')}, stride {storage.get('packed_raw', {}).get('stride')}"
+                prompt += f"\n   - Packed layout: {storage.get('packed_layout')}"
+                prompt += f"\n   - Scale/shift field `_scale_shift`: dtype {storage.get('scale_shift', {}).get('dtype')}, shape {storage.get('scale_shift', {}).get('shape')}, stride {storage.get('scale_shift', {}).get('stride')}"
+                prompt += f"\n   - Group size/axis: {storage.get('group_size')}, {storage.get('axis')}"
         elif 'value' in param and param['value'] is not None:
             prompt += f"\n   - Default/Example: {param['value']}"
         elif 'stats' in param:
@@ -452,12 +544,19 @@ matches the parameters above and the kernel is correct for this operator.
 Now generate the complete kernel.py file following the system prompt guidelines.
 """
     else:
-        prompt += """
+        if kernel_abi and kernel_abi.get("name") == quantized.TINY_GEMM_LINEAR_ABI:
+            signature_rule = f"""   - Must use the Kernel Forge Special ABI exactly:
+     `{kernel_abi.get('launch_signature', quantized.TINY_GEMM_LINEAR_SIGNATURE)}`
+   - This special ABI intentionally replaces the public PyTorch `linear(input, weight, bias)` launch signature for this quantized call.
+   - For `packed_weight_raw`, use `at::_ops::_weight_int4pack_mm::call` or an equivalent TinyGemm-aware path; do not hand-decode raw packed bytes as row-major nibbles."""
+        else:
+            signature_rule = """   - Must accept ALL parameters listed above in the exact order
+   - Optional parameters (None) should be handled with conditional logic"""
+        prompt += f"""
 ### Implementation Requirements
 
 1. **C++ Wrapper Function Signature:**
-   - Must accept ALL parameters listed above in the exact order
-   - Optional parameters (None) should be handled with conditional logic
+{signature_rule}
    - Return type must match the output specification
 
 2. **CUDA Kernel:**
@@ -612,6 +711,17 @@ Repair instructions:
 - For reductions over masked elements: use `tl.sum(tl.where(mask, val, 0.0))`.
 - Ensure all tensor outputs match PyTorch numerically and in shape.
 """.strip()
+    if (
+        quantized.is_linear_function(function_name)
+        and quantized.TINY_GEMM_LINEAR_ABI in str(feedback)
+    ):
+        signature_rule = f"""- Keep the Kernel Forge Special ABI launch signature EXACTLY:
+  `{quantized.TINY_GEMM_LINEAR_SIGNATURE}`
+- Do NOT change back to `linear(input, weight, bias)`; verifier/profiler pass raw TinyGemm storage as `packed_weight_raw`.
+- Do NOT manually decode `packed_weight_raw` as row-major nibbles. Use `at::_ops::_weight_int4pack_mm::call` or an equivalent TinyGemm-aware path."""
+    else:
+        signature_rule = "- Keep the launch() signature EXACTLY the same."
+
     return f"""
 The previous kernel for {function_name} failed validation on attempt {attempt + 1}.
 
@@ -619,7 +729,7 @@ ERROR SUMMARY (do not ignore):
 {feedback}
 
 Repair instructions:
-- Keep the launch() signature EXACTLY the same.
+{signature_rule}
 - Do NOT change argument order or types.
 - Only modify CUDA kernel logic, indexing, dtype handling, and launch configuration.
 - Do NOT add PYBIND11_MODULE blocks.
