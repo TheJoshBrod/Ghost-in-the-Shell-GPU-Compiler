@@ -20,6 +20,26 @@ from pathlib import Path
 import numpy as np
 
 
+def _maybe_show_help() -> None:
+    if not any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+        return
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="triton_remote_worker.py",
+        description=(
+            "Kernel Forge Triton remote worker. The worker is normally launched "
+            "over SSH and communicates with the controller using a binary "
+            "stdin/stdout protocol."
+        ),
+    )
+    parser.print_help()
+    raise SystemExit(0)
+
+
+_maybe_show_help()
+
+
 def configure_remote_env():
     """
     Verify Triton is available on the remote machine.
