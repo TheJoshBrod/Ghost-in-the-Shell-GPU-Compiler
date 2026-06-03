@@ -254,6 +254,8 @@ def _load_entry_file(pt: Path) -> tuple[str, Any, dict[str, Any]] | None:
 
 
 def _get_pytorch_func(op_name: str):
+    if op_name == "torch_flatten":
+        return torch.flatten
     if op_name == "torch_tensor_iadd":
         return torch.add
     if op_name.startswith(_TENSOR_METHOD_OP_PREFIX):

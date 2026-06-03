@@ -338,6 +338,59 @@ def test_profile_project_records_unique_case_counts(tmp_path, monkeypatch) -> No
     assert (tmp_path / "torch_nn_functional_gelu" / "entry_000000.pt").exists()
 
 
+def test_profile_project_records_allowlisted_torch_flatten(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KFORGE_PROFILE_CAPTURE_MODE", "unique")
+    monkeypatch.setenv("KFORGE_PROFILE_MAX_PER_OP", "all")
+    profile_project._reset_profile_capture_state()
+    profile_project._load_profile_filters({"profile": {"allow_ops": ["flatten"]}})
+
+    try:
+        profile_project.wrap_torch_top_level_functions()
+
+        x = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+        profile_project.CAPTURE_ACTIVE = True
+        try:
+            y = torch.flatten(x, 1)
+        finally:
+            profile_project.CAPTURE_ACTIVE = False
+
+        assert y.shape == (2, 12)
+        assert "torch.flatten" in profile_project.calls
+
+        profile_project.flush_calls(str(tmp_path), max_per_op=None)
+        summary = profile_project._unique_case_summary()
+        op_summary = summary["ops"]["torch.flatten"]
+
+        assert op_summary["op_dir"] == "torch_flatten"
+        assert op_summary["total_calls"] == 1
+        assert op_summary["unique_cases"] == 1
+
+        entry_path = tmp_path / "torch_flatten" / "entry_000000.pt"
+        assert entry_path.exists()
+        entry = torch.load(entry_path, map_location="cpu", weights_only=False)
+        assert entry["function_name"] == "torch.flatten"
+        assert entry["signature"]["params"] == ["input", "start_dim", "end_dim"]
+        assert entry["kwargs"]["start_dim"] == 1
+        assert entry["kwargs"]["end_dim"] == -1
+        assert torch.equal(entry["output"], y)
+    finally:
+        profile_project.CAPTURE_ACTIVE = False
+        profile_project._reset_profile_capture_state()
+        profile_project._load_profile_filters({})
+
+
+def test_benchmark_ops_maps_torch_flatten() -> None:
+    assert benchmark_ops._get_pytorch_func("torch_flatten") is torch.flatten
+
+
+def test_benchmark_ops_maps_sd35_missing_ops() -> None:
+    assert benchmark_ops._get_pytorch_func("torch_nn_functional_embedding") is torch.nn.functional.embedding
+    assert benchmark_ops._get_pytorch_func("torch_nn_functional_softmax") is torch.nn.functional.softmax
+    assert benchmark_ops._get_pytorch_func("torch_nn_functional_pad") is torch.nn.functional.pad
+    assert benchmark_ops._get_pytorch_func("torch_nn_functional_interpolate") is torch.nn.functional.interpolate
+    assert benchmark_ops._get_pytorch_func("torch_tensor_iadd") is torch.add
+
+
 def test_benchmark_ops_accepts_all_max_entries(tmp_path) -> None:
     for name in ("entry_000002.pt", "entry_000001.pt", "entry_000003.pt"):
         (tmp_path / name).write_text("placeholder", encoding="utf-8")

@@ -52,6 +52,7 @@ skipped_counts: dict[str, int] = {}
 unique_case_counts: dict[str, dict[str, int]] = {}
 unique_case_metadata: dict[str, dict[str, dict[str, Any]]] = {}
 TENSOR_IADD_FUNCTION_NAME = "torch.tensor.iadd"
+TORCH_TOP_LEVEL_FUNCTIONS = ("flatten",)
 _ORIGINAL_TENSOR_IADD = None
 TENSOR_METHODS_TO_WRAP = {
     "as_strided",
@@ -278,6 +279,10 @@ _KNOWN_SIGS: dict[str, dict] = {  # noqa: E501  (line-length; values kept readab
         "params": ["input", "output_size", "return_indices"],
         "defaults": {"return_indices": False},
     },
+    "torch.flatten": {
+        "params": ["input", "start_dim", "end_dim"],
+        "defaults": {"start_dim": 0, "end_dim": -1},
+    },
 }
 
 
@@ -360,6 +365,8 @@ def wrap_function(module, func_name: str) -> None:
     if not ENABLE_WRAPPING:
         return
     func = getattr(module, func_name)
+    if getattr(func, "__kernelforge_profile_wrapped__", False):
+        return
     if func in _wrapped:
         return
     _wrapped.add(func)
@@ -489,6 +496,7 @@ def wrap_function(module, func_name: str) -> None:
         entries.append(entry)
         return output
 
+    wrapper.__kernelforge_profile_wrapped__ = True
     setattr(module, func_name, wrapper)
 
 
@@ -510,6 +518,7 @@ def _wrap_module_callables(module) -> None:
 
 def wrap_torch_ops() -> None:
     _wrap_module_callables(torch)
+    wrap_torch_top_level_functions()
     _wrap_module_callables(F)
     try:
         _wrap_module_callables(torch._C._nn)
@@ -587,6 +596,13 @@ def wrap_tensor_methods() -> None:
             wrap_tensor_method(method_name)
         except Exception:
             continue
+
+
+def wrap_torch_top_level_functions() -> None:
+    for name in TORCH_TOP_LEVEL_FUNCTIONS:
+        obj = getattr(torch, name, None)
+        if callable(obj):
+            wrap_function(torch, name)
 
 
 def _restore_tensor_method_wrappers() -> None:

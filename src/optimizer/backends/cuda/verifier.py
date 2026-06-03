@@ -77,7 +77,18 @@ def summarize_issue_with_traceback(
 
 
 def handle_output(traceback_error: str, cu_code: str, log_file_path: Path, input_and_output: dict) -> str:
-    summarizer = summarize_issue_with_traceback if settings.llm_model_name else None
+    model_name = str(settings.llm_model_name or "")
+    disable_summary = os.environ.get("KFORGE_DISABLE_VERIFIER_LLM_SUMMARY", "").strip().lower()
+    summary_disabled = disable_summary in {"1", "true", "yes", "on"}
+    # byllm/LiteLLM currently sends a deprecated temperature parameter for
+    # claude-opus-4-7 verifier summaries. Main generation/repair uses GenModel
+    # and remains enabled; skip only this optional diagnostic summarizer.
+    opus47_summary_unsupported = "claude-opus-4-7" in model_name
+    summarizer = (
+        summarize_issue_with_traceback
+        if model_name and not summary_disabled and not opus47_summary_unsupported
+        else None
+    )
     return format_verifier_output(
         traceback_error=traceback_error,
         kernel_code=cu_code,
