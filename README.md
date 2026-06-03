@@ -24,7 +24,7 @@ Kernel Forge automatically generates and optimizes GPU kernels for PyTorch model
 - **AI infrastructure teams** targeting specific GPU hardware (NVIDIA CUDA or AMD ROCm) who need kernels tuned to that exact device.
 - **Teams with remote GPU access** who run optimization on a separate GPU server while managing projects locally.
 - **Researchers** benchmarking operator-level speedups across different LLM backends or optimization strategies.
-- **Teams packaging models for deployment** who want a self-contained inference artifact with kernels baked in and no runtime dependency on KernelForge.
+- **Teams packaging models for deployment** who want an inference artifact with model weights and optimized kernels baked in.
 
 ---
 
@@ -36,7 +36,7 @@ Kernel Forge automatically generates and optimizes GPU kernels for PyTorch model
 - Remote execution over SSH - no local GPU required
 - Multi-LLM support: Anthropic, OpenAI, Google
 - Web dashboard with live progress, speed charts, and MCTS tree inspector
-- Portable `.anvil` snapshots and self-contained `.cast` inference packages
+- Portable `.anvil` snapshots and deployment-oriented `.cast` inference packages
 
 [Full feature details](docs/features.md)
 

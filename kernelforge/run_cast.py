@@ -17,6 +17,10 @@ import time
 import zipfile
 from typing import Any, Callable
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import torch.nn as nn
 
 from src.optimizer.quantized import prepare_tinygemm_linear_launch_args
