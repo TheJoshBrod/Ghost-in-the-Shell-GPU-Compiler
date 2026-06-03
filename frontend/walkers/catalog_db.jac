@@ -382,6 +382,9 @@ def:pub _write_project_run_state_db(project_name: str, state: dict) -> None {
     conn.close();
     for job_key in state {
         job_state = state[job_key];
+        if not isinstance(job_state, dict) {
+            continue;
+        }
         if not job_state or not ("status" in job_state) {
             continue;
         }

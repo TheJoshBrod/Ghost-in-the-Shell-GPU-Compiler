@@ -336,6 +336,9 @@ def:pub _normalize_job_flags(project_name: str, state: dict, state_path: str) ->
     }
     for job_key in state {
         job = state[job_key];
+        if not isinstance(job, dict) {
+            continue;
+        }
         if not job or not ("status" in job) {
             continue;
         }
