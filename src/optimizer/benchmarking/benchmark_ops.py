@@ -28,6 +28,24 @@ from .paths import find_latest_optimized_dir, project_dir_for_name
 from .state import read_json_file, write_json_file
 
 _MAX_ENTRIES_ALL_VALUES = {"0", "all", "none", "unlimited"}
+_TENSOR_METHOD_OP_PREFIX = "torch_tensor_"
+_TENSOR_METHODS_TO_REPLAY = {
+    "as_strided",
+    "contiguous",
+    "expand",
+    "expand_as",
+    "flatten",
+    "narrow",
+    "permute",
+    "reshape",
+    "split",
+    "squeeze",
+    "t",
+    "to",
+    "transpose",
+    "unsqueeze",
+    "view",
+}
 
 
 def _now_iso() -> str:
@@ -238,6 +256,10 @@ def _load_entry_file(pt: Path) -> tuple[str, Any, dict[str, Any]] | None:
 def _get_pytorch_func(op_name: str):
     if op_name == "torch_tensor_iadd":
         return torch.add
+    if op_name.startswith(_TENSOR_METHOD_OP_PREFIX):
+        method_name = op_name.replace(_TENSOR_METHOD_OP_PREFIX, "", 1)
+        if method_name in _TENSOR_METHODS_TO_REPLAY:
+            return _tensor_method_callable(method_name)
     if op_name.startswith("torch_nn_functional_"):
         fn_name = op_name.replace("torch_nn_functional_", "", 1)
         if hasattr(F, fn_name):
@@ -259,6 +281,14 @@ def _get_pytorch_func(op_name: str):
         "torch_nn_functional_conv2d": F.conv2d,
     }
     return mapping.get(op_name)
+
+
+def _tensor_method_callable(method_name: str):
+    def _call_tensor_method(tensor, *args, **kwargs):
+        return getattr(tensor, method_name)(*args, **kwargs)
+
+    _call_tensor_method.__name__ = f"tensor_{method_name}"
+    return _call_tensor_method
 
 
 def _run_call(func, args: Any, kwargs: dict[str, Any]):

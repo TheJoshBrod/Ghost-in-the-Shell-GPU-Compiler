@@ -201,6 +201,43 @@ def test_profile_project_tensor_methods_respect_capture_gate() -> None:
     assert profile_project.calls == {}
 
 
+def test_generator_monitor_replays_bound_tensor_methods() -> None:
+    from src.generator import main as generator_main
+
+    cases = [
+        ("torch.tensor.view", [torch.arange(6), 2, 3], {}, (2, 3), None),
+        ("torch.tensor.reshape", [torch.arange(6), 3, 2], {}, (3, 2), None),
+        ("torch.tensor.flatten", [torch.arange(6).view(2, 3)], {}, (6,), None),
+        ("torch.tensor.to", [torch.arange(6)], {"dtype": torch.float64}, (6,), torch.float64),
+    ]
+
+    for function_name, args, kwargs, expected_shape, expected_dtype in cases:
+        expr = generator_main._monitor_exec_for_function(function_name)
+        output = eval(expr, {"torch": torch}, {"args": args, "kwargs": kwargs})
+
+        assert tuple(output.shape) == expected_shape
+        if expected_dtype is not None:
+            assert output.dtype == expected_dtype
+
+
+def test_benchmark_ops_resolves_bound_tensor_method_baselines() -> None:
+    x = torch.arange(6)
+
+    view = benchmark_ops._get_pytorch_func("torch_tensor_view")
+    reshape = benchmark_ops._get_pytorch_func("torch_tensor_reshape")
+    flatten = benchmark_ops._get_pytorch_func("torch_tensor_flatten")
+    to_dtype = benchmark_ops._get_pytorch_func("torch_tensor_to")
+
+    assert view is not None
+    assert reshape is not None
+    assert flatten is not None
+    assert to_dtype is not None
+    assert view(x, 2, 3).shape == (2, 3)
+    assert reshape(x, 3, 2).shape == (3, 2)
+    assert flatten(x.view(2, 3)).shape == (6,)
+    assert to_dtype(x, dtype=torch.float64).dtype == torch.float64
+
+
 def test_profile_project_unique_case_signature_ignores_tensor_values() -> None:
     x1 = torch.zeros((2, 3), dtype=torch.float32)
     x2 = torch.ones((2, 3), dtype=torch.float32)

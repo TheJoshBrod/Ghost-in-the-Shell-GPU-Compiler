@@ -206,9 +206,16 @@ def _load_op_counts(io_dir: Path) -> dict:
     return {_normalize_op_name(k): int(v) for k, v in counts.items()}
 
 
+_TENSOR_METHOD_FUNCTION_PREFIX = "torch.tensor."
+
+
 def _monitor_exec_for_function(function_name: str) -> str:
     if function_name == "torch.tensor.iadd":
         return "torch.add(*args, **kwargs)"
+    if function_name.startswith(_TENSOR_METHOD_FUNCTION_PREFIX):
+        method_name = function_name.replace(_TENSOR_METHOD_FUNCTION_PREFIX, "", 1)
+        if method_name.isidentifier():
+            return f"getattr(args[0], {method_name!r})(*args[1:], **kwargs)"
     return f"{function_name}(*args, **kwargs)"
 
 
