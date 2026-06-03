@@ -40,27 +40,6 @@ Kernel Forge automatically generates and optimizes GPU kernels for PyTorch model
 
 [Full feature details](docs/features.md)
 
----
-
-## Benchmark Snapshot
-
-### Qwen 3.5 35B-A3B
-
-On this mixed-workload run, `Kernel Forge mixed latest` delivered the best overall result against both PyTorch eager and `torch.compile`.
-
-- Total latency: `3693.6 ms` vs `4193.3 ms` for PyTorch eager and `4546.5 ms` for `torch.compile`
-- Relative to eager throughput: `1.09x` prefill tok/s, `1.14x` decode tok/s, and `1.13x` total tok/s
-- In this run, `torch.compile` slightly improved prefill (`1.02x`) but regressed decode (`0.92x`) and total throughput (`0.92x`) relative to eager
-
-<table>
-<tr>
-<td><img src="docs/benchmarks/qwen35_mixed_latency_breakdown.png" alt="Qwen 3.5 35B-A3B latency breakdown"/></td>
-<td><img src="docs/benchmarks/qwen35_mixed_throughput_vs_eager.png" alt="Qwen 3.5 35B-A3B throughput vs PyTorch eager"/></td>
-</tr>
-</table>
-
----
-
 ## Quick start
 
 See [system requirements](docs/requirements.md) before installing.
