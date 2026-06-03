@@ -2069,11 +2069,13 @@ def:pub Dashboard -> Any {
 
     for r in operatorRows {
         r["runtime_pct"] = "--";
+        r["runtime_pct_raw"] = 0.0;
         c_count = r["call_count"] if "call_count" in r else 1;
         b_total = r["baseline_total_raw"] if "baseline_total_raw" in r else None;
         b_raw = r["baseline_raw"] if "baseline_raw" in r else None;
         if b_total != None and b_total > 0 and grandTotalPytorchTime > 0 {
             pct = (b_total / grandTotalPytorchTime) * 100.0;
+            r["runtime_pct_raw"] = pct;
             if pct < 0.1 {
                 r["runtime_pct"] = "<0.1%";
             } else {
@@ -2081,6 +2083,7 @@ def:pub Dashboard -> Any {
             }
         } elif b_raw != None and b_raw > 0 and grandTotalPytorchTime > 0 {
             pct = ((b_raw * c_count) / grandTotalPytorchTime) * 100.0;
+            r["runtime_pct_raw"] = pct;
             if pct < 0.1 {
                 r["runtime_pct"] = "<0.1%";
             } else {

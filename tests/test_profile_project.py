@@ -28,6 +28,18 @@ class _ValidationPreferredModule:
         return ["validation-a", "validation-b"]
 
 
+@pytest.fixture(autouse=True)
+def _reset_profile_filters():
+    profile_project._load_profile_filters({})
+    profile_project._reset_profile_capture_state()
+    profile_project.CAPTURE_ACTIVE = False
+    yield
+    profile_project.CAPTURE_ACTIVE = False
+    profile_project._reset_profile_capture_state()
+    profile_project._restore_tensor_method_wrappers()
+    profile_project._load_profile_filters({})
+
+
 def test_profile_project_limits_list_samples() -> None:
     assert get_samples(_ListSampleModule(), 2, None) == ["a", "b"]
 
@@ -71,6 +83,122 @@ def test_profile_project_keeps_default_and_integer_profile_limits(monkeypatch) -
 
     monkeypatch.setenv("KFORGE_PROFILE_MAX_PER_OP", "4")
     assert profile_project._profile_max_per_op() == 4
+
+
+@pytest.mark.parametrize(
+    "full_key",
+    [
+        "torch.reshape",
+        "torch.Tensor.view",
+        "torch.randn",
+        "torch.randint",
+        "torch.flatten",
+        "torch.to",
+        "torch.clone",
+        "torch.empty",
+        "torch.nn.functional.linear",
+    ],
+)
+def test_profile_project_profiles_non_dropout_ops_by_default(full_key: str) -> None:
+    assert profile_project._should_skip(full_key) is False
+
+
+@pytest.mark.parametrize(
+    "full_key",
+    [
+        "torch.nn.functional.dropout",
+        "torch.nn.functional.dropout_",
+        "torch.nn.functional.alpha_dropout",
+        "torch.nn.functional.feature_alpha_dropout",
+    ],
+)
+def test_profile_project_skips_dropout_ops(full_key: str) -> None:
+    assert profile_project._should_skip(full_key) is True
+
+
+def test_profile_project_ignores_config_allowlist_and_skiplist() -> None:
+    profile_project._load_profile_filters(
+        {
+            "profile": {
+                "allow_ops": ["linear"],
+                "allowlist": ["conv2d"],
+                "skip_ops": ["reshape"],
+                "skiplist": ["flatten"],
+                "skip_prefixes": ["rand"],
+            }
+        }
+    )
+
+    assert profile_project._should_skip("torch.nn.functional.gelu") is False
+    assert profile_project._should_skip("torch.reshape") is False
+    assert profile_project._should_skip("torch.randn") is False
+    assert profile_project._should_skip("torch.nn.functional.dropout") is True
+
+
+def test_profile_project_wraps_torch_callables_but_not_classes(monkeypatch) -> None:
+    def compute_op(value):
+        return value
+
+    def foreign_op(value):
+        return value
+
+    compute_op.__module__ = "torch"
+    foreign_op.__module__ = "not_torch"
+
+    fake_module = type(
+        "FakeTorchModule",
+        (),
+        {
+            "__name__": "torch",
+            "Tensor": type("Tensor", (), {}),
+            "compute_op": compute_op,
+            "foreign_op": foreign_op,
+        },
+    )()
+    wrapped: list[str] = []
+    monkeypatch.setattr(
+        profile_project,
+        "wrap_function",
+        lambda module, func_name: wrapped.append(func_name),
+    )
+
+    profile_project._wrap_module_callables(fake_module)
+
+    assert wrapped == ["compute_op"]
+
+
+def test_profile_project_records_bound_tensor_methods() -> None:
+    x = torch.arange(12)
+    profile_project.wrap_tensor_methods()
+
+    profile_project.CAPTURE_ACTIVE = True
+    try:
+        viewed = x.view(3, 4)
+        reshaped = x.reshape(2, 6)
+        flattened = viewed.flatten()
+        converted = flattened.to(dtype=torch.float64)
+    finally:
+        profile_project.CAPTURE_ACTIVE = False
+
+    assert reshaped.shape == (2, 6)
+    assert converted.dtype == torch.float64
+    for key in [
+        "torch.tensor.view",
+        "torch.tensor.reshape",
+        "torch.tensor.flatten",
+        "torch.tensor.to",
+    ]:
+        assert key in profile_project.calls
+        assert len(profile_project.calls[key]) == 1
+        assert profile_project.calls[key][0]["function_name"] == key
+
+
+def test_profile_project_tensor_methods_respect_capture_gate() -> None:
+    x = torch.arange(6)
+    profile_project.wrap_tensor_methods()
+
+    assert x.view(2, 3).shape == (2, 3)
+    assert profile_project.calls == {}
 
 
 def test_profile_project_unique_case_signature_ignores_tensor_values() -> None:

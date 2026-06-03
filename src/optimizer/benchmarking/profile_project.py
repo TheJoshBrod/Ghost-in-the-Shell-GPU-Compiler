@@ -40,68 +40,37 @@ DEFAULT_SKIP_OPS = {
     "dropout_",
     "alpha_dropout",
     "feature_alpha_dropout",
-    "rand",
-    "rand_like",
-    "randn",
-    "randn_like",
-    "randint",
-    "bernoulli",
-    "multinomial",
-    "normal",
-    "uniform",
-    "poisson",
-    "exponential",
-    "view",
-    "reshape",
-    "permute",
-    "transpose",
-    "t",
-    "squeeze",
-    "unsqueeze",
-    "expand",
-    "expand_as",
-    "as_strided",
-    "flatten",
-    "size",
-    "stride",
-    "numel",
-    "dim",
-    "shape",
-    "to",
-    "_to_copy",
-    "contiguous",
-    "clone",
-    "copy_",
-    "detach",
-    "empty",
-    "zeros",
-    "ones",
-    "full",
-    "arange",
-    "empty_like",
-    "zeros_like",
-    "ones_like",
-    "full_like",
-    "new_empty",
-    "new_zeros",
-    "new_ones",
-    "new_full",
 }
 
-DEFAULT_SKIP_PREFIXES = {"rand", "randn", "randint"}
-
-PROFILE_ALLOW_OPS: set[str] = set()
 PROFILE_SKIP_OPS: set[str] = set(DEFAULT_SKIP_OPS)
-PROFILE_SKIP_PREFIXES: set[str] = set(DEFAULT_SKIP_PREFIXES)
 
 calls: dict[str, list[dict[str, Any]]] = {}
 _wrapped: set[Any] = set()
 ENABLE_WRAPPING = True
+CAPTURE_ACTIVE = False
 skipped_counts: dict[str, int] = {}
 unique_case_counts: dict[str, dict[str, int]] = {}
 unique_case_metadata: dict[str, dict[str, dict[str, Any]]] = {}
 TENSOR_IADD_FUNCTION_NAME = "torch.tensor.iadd"
 _ORIGINAL_TENSOR_IADD = None
+TENSOR_METHODS_TO_WRAP = {
+    "as_strided",
+    "contiguous",
+    "expand",
+    "expand_as",
+    "flatten",
+    "narrow",
+    "permute",
+    "reshape",
+    "split",
+    "squeeze",
+    "t",
+    "to",
+    "transpose",
+    "unsqueeze",
+    "view",
+}
+_ORIGINAL_TENSOR_METHODS: dict[str, Any] = {}
 _TENSOR_IADD_SIGNATURE = {
     "params": ["input", "other"],
     "defaults": {},
@@ -375,31 +344,15 @@ def _normalize_op_name(full_key: str) -> str:
     return full_key.split(".")[-1].lower().strip()
 
 
-def _load_profile_filters(config: dict[str, Any]) -> None:
-    global PROFILE_ALLOW_OPS, PROFILE_SKIP_OPS, PROFILE_SKIP_PREFIXES
-    PROFILE_ALLOW_OPS = set()
+def _load_profile_filters(_config: dict[str, Any]) -> None:
+    global PROFILE_SKIP_OPS
     PROFILE_SKIP_OPS = set(DEFAULT_SKIP_OPS)
-    PROFILE_SKIP_PREFIXES = set(DEFAULT_SKIP_PREFIXES)
-
-    profile_cfg = config.get("profile") if isinstance(config, dict) else None
-    if isinstance(profile_cfg, dict):
-        allow_ops = profile_cfg.get("allow_ops") or profile_cfg.get("allowlist") or []
-        skip_ops = profile_cfg.get("skip_ops") or profile_cfg.get("skiplist") or []
-        skip_prefixes = profile_cfg.get("skip_prefixes") or []
-        PROFILE_ALLOW_OPS = {str(op).lower() for op in allow_ops if op}
-        PROFILE_SKIP_OPS.update({str(op).lower() for op in skip_ops if op})
-        PROFILE_SKIP_PREFIXES.update({str(op).lower() for op in skip_prefixes if op})
 
 
 def _should_skip(full_key: str) -> bool:
     op_name = _normalize_op_name(full_key)
-    if PROFILE_ALLOW_OPS:
-        return op_name not in PROFILE_ALLOW_OPS and full_key.lower() not in PROFILE_ALLOW_OPS
     if op_name in PROFILE_SKIP_OPS or full_key.lower() in PROFILE_SKIP_OPS:
         return True
-    for prefix in PROFILE_SKIP_PREFIXES:
-        if op_name.startswith(prefix):
-            return True
     return False
 
 
@@ -455,6 +408,8 @@ def wrap_function(module, func_name: str) -> None:
         key = f"{module_path}.{func_name}"
         output = func(*args, **kwargs)
 
+        if not CAPTURE_ACTIVE:
+            return output
         if _should_skip(key):
             skipped_counts[key] = skipped_counts.get(key, 0) + 1
             return output
@@ -537,24 +492,110 @@ def wrap_function(module, func_name: str) -> None:
     setattr(module, func_name, wrapper)
 
 
-def wrap_torch_nn_functional() -> None:
-    for name in dir(F):
+def _wrap_module_callables(module) -> None:
+    for name in dir(module):
         if name.startswith("_"):
             continue
         if name in SKIP_FUNCTIONS:
             continue
-        obj = getattr(F, name)
+        obj = getattr(module, name)
+        if inspect.isclass(obj):
+            continue
         if not callable(obj):
             continue
         if (getattr(obj, "__module__", "") or "") not in _COMPUTE_MODULES:
             continue
-        wrap_function(F, name)
+        wrap_function(module, name)
+
+
+def wrap_torch_ops() -> None:
+    _wrap_module_callables(torch)
+    _wrap_module_callables(F)
+    try:
+        _wrap_module_callables(torch._C._nn)
+    except Exception:
+        pass
+    wrap_tensor_methods()
 
 
 def _clone_for_profile(value):
     if torch.is_tensor(value):
         return value.detach().clone()
     return value
+
+
+def _tensor_method_function_name(method_name: str) -> str:
+    return f"torch.tensor.{method_name}"
+
+
+def wrap_tensor_method(method_name: str) -> None:
+    if not ENABLE_WRAPPING or method_name in _ORIGINAL_TENSOR_METHODS:
+        return
+    original = getattr(torch.Tensor, method_name, None)
+    if original is None or not callable(original):
+        return
+
+    key = _tensor_method_function_name(method_name)
+
+    @wraps(original)
+    def wrapper(self, *args, **kwargs):
+        output = original(self, *args, **kwargs)
+
+        if not CAPTURE_ACTIVE:
+            return output
+        if _should_skip(key):
+            skipped_counts[key] = skipped_counts.get(key, 0) + 1
+            return output
+
+        unique_capture = _is_unique_capture_mode()
+        entries = calls.setdefault(key, [])
+        max_per_op = _profile_max_per_op()
+        if not unique_capture and _profile_limit_reached(len(entries), max_per_op):
+            limit_key = f"{key}:profile_max_per_op"
+            skipped_counts[limit_key] = skipped_counts.get(limit_key, 0) + 1
+            return output
+
+        live_args = [self, *args]
+        case_payload = None
+        case_key = ""
+        if unique_capture:
+            case_payload = _profile_case_payload(key, live_args, dict(kwargs))
+            case_key, should_save = _record_unique_case(key, case_payload)
+            if not should_save:
+                duplicate_key = f"{key}:duplicate_profile_case"
+                skipped_counts[duplicate_key] = skipped_counts.get(duplicate_key, 0) + 1
+                return output
+
+        entry = {
+            "function_name": key,
+            "args": [_serialize(arg) for arg in live_args],
+            "kwargs": {k: _serialize(v) for k, v in kwargs.items()},
+            "output": _serialize(output),
+        }
+        if unique_capture and case_payload is not None:
+            _annotate_unique_entry(entry, case_key, case_payload)
+        entries.append(entry)
+        return output
+
+    _ORIGINAL_TENSOR_METHODS[method_name] = original
+    setattr(torch.Tensor, method_name, wrapper)
+
+
+def wrap_tensor_methods() -> None:
+    for method_name in sorted(TENSOR_METHODS_TO_WRAP):
+        try:
+            wrap_tensor_method(method_name)
+        except Exception:
+            continue
+
+
+def _restore_tensor_method_wrappers() -> None:
+    for method_name, original in list(_ORIGINAL_TENSOR_METHODS.items()):
+        try:
+            setattr(torch.Tensor, method_name, original)
+        except Exception:
+            pass
+    _ORIGINAL_TENSOR_METHODS.clear()
 
 
 def wrap_tensor_iadd() -> None:
@@ -569,7 +610,7 @@ def wrap_tensor_iadd() -> None:
         lhs_before = None
         other_before = None
         unique_capture = _is_unique_capture_mode()
-        if not _should_skip(TENSOR_IADD_FUNCTION_NAME):
+        if CAPTURE_ACTIVE and not _should_skip(TENSOR_IADD_FUNCTION_NAME):
             entries = calls.setdefault(TENSOR_IADD_FUNCTION_NAME, [])
             max_per_op = _profile_max_per_op()
             if unique_capture or not _profile_limit_reached(len(entries), max_per_op):
@@ -578,6 +619,8 @@ def wrap_tensor_iadd() -> None:
 
         output = original(self, other)
 
+        if not CAPTURE_ACTIVE:
+            return output
         if _should_skip(TENSOR_IADD_FUNCTION_NAME):
             skipped_counts[TENSOR_IADD_FUNCTION_NAME] = skipped_counts.get(TENSOR_IADD_FUNCTION_NAME, 0) + 1
             return output
@@ -969,6 +1012,7 @@ def _default_sample_from_model(model) -> Any:
 
 
 def main() -> int:
+    global CAPTURE_ACTIVE
     parser = argparse.ArgumentParser(
         description="Profile a project model to capture per-op inputs/outputs."
     )
@@ -997,7 +1041,7 @@ def main() -> int:
     config = load_project_config(project_dir)
     _reset_profile_capture_state()
     _load_profile_filters(config)
-    wrap_torch_nn_functional()
+    wrap_torch_ops()
     wrap_tensor_iadd()
 
     module = import_model_module(model_path)
@@ -1029,10 +1073,14 @@ def main() -> int:
             args_tuple, kwargs = normalize_inputs(sample)
             args_tuple = move_to_device(args_tuple, device)
             kwargs = move_to_device(kwargs, device)
+            CAPTURE_ACTIVE = True
             try:
-                model(*args_tuple, **kwargs)
-            except TypeError:
-                model(*args_tuple)
+                try:
+                    model(*args_tuple, **kwargs)
+                except TypeError:
+                    model(*args_tuple)
+            finally:
+                CAPTURE_ACTIVE = False
 
             save_max_per_op = None if capture_mode == "unique" else max_per_op
             batch_counts = flush_calls(str(out_dir), max_per_op=save_max_per_op)
@@ -1076,9 +1124,7 @@ def main() -> int:
         "op_profile_ms": op_profile_ms,
         "skipped_counts": skipped_counts,
         "skip_filters": {
-            "allow_ops": sorted(PROFILE_ALLOW_OPS),
             "skip_ops": sorted(PROFILE_SKIP_OPS),
-            "skip_prefixes": sorted(PROFILE_SKIP_PREFIXES),
         },
     }
     if capture_mode == "unique":

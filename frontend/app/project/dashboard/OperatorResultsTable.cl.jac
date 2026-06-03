@@ -36,6 +36,7 @@ def:pub OperatorResultsTable(props: any) -> Any {
 
     [sortColumn, setSortColumn] = useState("display_order");
     [sortDirection, setSortDirection] = useState("asc");
+    [showRuntimeMajorOnly, setShowRuntimeMajorOnly] = useState(False);
 
     def handleSort(column: str) -> None {
         if sortColumn == column {
@@ -53,8 +54,19 @@ def:pub OperatorResultsTable(props: any) -> Any {
         return <span className="text-zinc-300 ml-1">{ "↓" if sortDirection == "desc" else "↑" }</span>;
     }
 
-    # Sort the rows before rendering
-    sortedRows = to_list(operatorRows);
+    sortedRows = [];
+    for row in to_list(operatorRows) {
+        if not row {
+            continue;
+        }
+        if showRuntimeMajorOnly {
+            pct_raw = row["runtime_pct_raw"] if "runtime_pct_raw" in row and row["runtime_pct_raw"] != None else 0.0;
+            if pct_raw < 1.0 {
+                continue;
+            }
+        }
+        sortedRows.push(row);
+    }
     sortedRows.sort(lambda a: dict, b: dict -> int {
         if not a and not b { return 0; }
         if not a { return 1; }
@@ -73,11 +85,8 @@ def:pub OperatorResultsTable(props: any) -> Any {
             valA = a["baseline_raw"] if "baseline_raw" in a else 0.0;
             valB = b["baseline_raw"] if "baseline_raw" in b else 0.0;
         } elif sortColumn == "runtime_pct" {
-            # Parse runtime_pct string to number for sorting ("<0.1%" -> 0, "12.5%" -> 12.5)
-            pctA = a["runtime_pct"] if "runtime_pct" in a else "0";
-            pctB = b["runtime_pct"] if "runtime_pct" in b else "0";
-            valA = 0.0 if pctA == "<0.1%" or pctA == "--" else parseFloat(pctA.replace("%", ""));
-            valB = 0.0 if pctB == "<0.1%" or pctB == "--" else parseFloat(pctB.replace("%", ""));
+            valA = a["runtime_pct_raw"] if "runtime_pct_raw" in a and a["runtime_pct_raw"] != None else 0.0;
+            valB = b["runtime_pct_raw"] if "runtime_pct_raw" in b and b["runtime_pct_raw"] != None else 0.0;
         } elif sortColumn == "call_count" {
             valA = a["call_count"] if "call_count" in a else 0;
             valB = b["call_count"] if "call_count" in b else 0;
@@ -241,6 +250,7 @@ def:pub OperatorResultsTable(props: any) -> Any {
             </tr>
         );
     }
+    hasUnfilteredRows = list_len(to_list(operatorRows)) > 0;
 
     return
         <div className="rounded-md border border-[var(--border)] bg-[var(--surface-0)] overflow-hidden">
@@ -248,6 +258,16 @@ def:pub OperatorResultsTable(props: any) -> Any {
                 <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-200">
                     Operator Results
                 </h3>
+                <label className="flex items-center gap-2 text-[11px] text-zinc-400 select-none">
+                    <input
+                        type="checkbox"
+                        className="sr-only peer"
+                        checked={showRuntimeMajorOnly}
+                        onChange={lambda e: any -> None { setShowRuntimeMajorOnly(e.target.checked); }}
+                    />
+                    <span className="relative h-5 w-9 rounded-full bg-zinc-800 border border-zinc-700 transition-colors peer-checked:bg-[var(--accent-orange)]/80 peer-checked:border-[var(--accent-orange)] after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-zinc-300 after:transition-transform peer-checked:after:translate-x-4"></span>
+                    <span>{"Show >=1% runtime only"}</span>
+                </label>
             </div>
             <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -295,8 +315,11 @@ def:pub OperatorResultsTable(props: any) -> Any {
                     Profiling in progress...
                 </div> if list_len(operatorRowsNodes) == 0 and not loading and profiling else <span></span>}
                 {<div className="p-8 text-center text-xs text-zinc-500 font-mono">
+                    No operators at or above 1% runtime. Disable the filter to show all profiled operators.
+                </div> if list_len(operatorRowsNodes) == 0 and not loading and not profiling and showRuntimeMajorOnly and hasUnfilteredRows else <span></span>}
+                {<div className="p-8 text-center text-xs text-zinc-500 font-mono">
                     No operators discovered yet. Profile the model to find operators.
-                </div> if list_len(operatorRowsNodes) == 0 and not loading and not profiling else <span></span>}
+                </div> if list_len(operatorRowsNodes) == 0 and not loading and not profiling and not (showRuntimeMajorOnly and hasUnfilteredRows) else <span></span>}
             </div>
         </div>;
 }

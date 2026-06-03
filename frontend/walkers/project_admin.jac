@@ -484,7 +484,6 @@ walker:pub CreateProject {
                     "extra_validation_cases": 1,
                     "target_device": self.selectedBackend if self.selectedBackend else target_device
                 },
-                "profile": {"allow_ops": [], "skip_ops": [], "skip_prefixes": []},
                 "artifacts": {"weights": weight_artifacts}
             };
             if benchmarked_gpu_entry {
