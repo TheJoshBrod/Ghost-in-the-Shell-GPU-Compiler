@@ -84,7 +84,7 @@ Walkers are defined in `frontend/walkers/`:
 | `llm.jac` | LLM model listing | `GetOpenLLMModels`, `TestLLMConnection` |
 | `project_admin.jac` | Project CRUD, operator listing, benchmarks, export | `CreateProject`, `DeleteProject`, `GetProjects`, `GetProjectOps`, `GetProjectStatus`, `GetProjectBenchmarks`, `ExportProject`, `CloneProjectForGpu` |
 | `kernel_job_runners.jac` | Job execution and control | `StartProfile`, `StartGenerate`, `StartOptimize`, `StartBenchmark`, `SetJobControl`, `ClearProjectQueue`, `GetJobLog` |
-| `optimization_results.jac` | Results, MCTS data, metrics, kernel import/export | `GetDashboardCharts`, `GetMctsTree`, `GetProjectMctsSummary`, `GetOpDetails`, `GetProjectMetrics`, `ImportKernel`, `DownloadCast` |
+| `optimization_results.jac` | Results, MCTS data, metrics, kernel import/export | `GetDashboardCharts`, `GetMctsTree`, `GetProjectMctsSummary`, `GetOpDetails`, `GetProjectMetrics`, `ImportKernel`, `GetCastExportPlan`, `DownloadCast`, `GetCastChunk` |
 | `catalog_db.jac` | SQLite project catalog persistence | (none public) |
 | `job_supervisor.jac` | Job queue management, state persistence, hardware/LLM env setup | (none public) |
 

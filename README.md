@@ -24,7 +24,7 @@ Kernel Forge automatically generates and optimizes GPU kernels for PyTorch model
 - **AI infrastructure teams** targeting specific GPU hardware (NVIDIA CUDA or AMD ROCm) who need kernels tuned to that exact device.
 - **Teams with remote GPU access** who run optimization on a separate GPU server while managing projects locally.
 - **Researchers** benchmarking operator-level speedups across different LLM backends or optimization strategies.
-- **Teams packaging models for deployment** who want a self-contained inference artifact with kernels baked in and no runtime dependency on KernelForge.
+- **Teams packaging models for deployment** who want an inference artifact with model weights and optimized kernels baked in.
 
 ---
 
@@ -36,7 +36,7 @@ Kernel Forge automatically generates and optimizes GPU kernels for PyTorch model
 - Remote execution over SSH - no local GPU required
 - Multi-LLM support: Anthropic, OpenAI, Google
 - Web dashboard with live progress, speed charts, and MCTS tree inspector
-- Portable `.anvil` snapshots and self-contained `.cast` inference packages
+- Portable `.anvil` snapshots and deployment-oriented `.cast` inference packages
 
 [Full feature details](docs/features.md)
 
@@ -44,22 +44,16 @@ Kernel Forge automatically generates and optimizes GPU kernels for PyTorch model
 
 ## Benchmark Snapshot
 
-### Qwen 3.5 35B-A3B
+The arXiv evaluation reports opt50 operator-level results on four real PyTorch workloads running on an NVIDIA DGX Spark with GB10 GPU. The most favorable generated-kernel wins are measured against the PyTorch eager path for the same captured operator inputs.
 
-On this mixed-workload run, `Kernel Forge mixed latest` delivered the best overall result against both PyTorch eager and `torch.compile`.
+<p align="center">
+  <img src="docs/benchmarks/kernel_forge_opt50_best_speedups.png" alt="Best Kernel Forge opt50 generated-kernel speedups" width="49%"/>
+  <img src="docs/benchmarks/kernel_forge_opt50_operator_wins.png" alt="Kernel Forge opt50 generated operator wins by workload" width="49%"/>
+</p>
 
-- Total latency: `3693.6 ms` vs `4193.3 ms` for PyTorch eager and `4546.5 ms` for `torch.compile`
-- Relative to eager throughput: `1.09x` prefill tok/s, `1.14x` decode tok/s, and `1.13x` total tok/s
-- In this run, `torch.compile` slightly improved prefill (`1.02x`) but regressed decode (`0.92x`) and total throughput (`0.92x`) relative to eager
-
-<table>
-<tr>
-<td><img src="docs/benchmarks/qwen35_mixed_latency_breakdown.png" alt="Qwen 3.5 35B-A3B latency breakdown"/></td>
-<td><img src="docs/benchmarks/qwen35_mixed_throughput_vs_eager.png" alt="Qwen 3.5 35B-A3B throughput vs PyTorch eager"/></td>
-</tr>
-</table>
-
----
+- Best generated-kernel wins: `2.83x` on Gemma 4 E2B softmax, `1.70x` on Stable Diffusion 3.5 Medium group normalization, `1.54x` on Qwen 3.5 35B-A3B softmax, and `1.52x` on ResNet-50 adaptive average pooling.
+- Across ResNet-50, Stable Diffusion 3.5 Medium, Gemma 4 E2B, and Qwen 3.5 35B-A3B, 14 generated operator candidates outperform PyTorch eager at opt50.
+- Kernel Forge uses guarded dispatch: generated kernels are selected only where they improve measured operator latency, while PyTorch eager is preserved for stronger framework or vendor-backed paths.
 
 ## Quick start
 

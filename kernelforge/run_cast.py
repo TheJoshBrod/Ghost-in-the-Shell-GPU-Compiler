@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import copy
 import glob
 import hashlib
 import inspect
@@ -10,12 +11,19 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import zipfile
 from typing import Any, Callable
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import torch.nn as nn
+
+from src.optimizer.quantized import prepare_tinygemm_linear_launch_args
 
 
 def verify_checksums(zf: zipfile.ZipFile) -> None:
@@ -43,6 +51,17 @@ def verify_checksums(zf: zipfile.ZipFile) -> None:
 
 def ensure_cuda_toolkit_env() -> str | None:
     """Point CUDA_HOME/CUDACXX/PATH and torch cpp_extension at a working nvcc."""
+
+    # The benchmark harness often invokes the venv's Python by absolute path
+    # without activating the venv. Torch's extension loader shells out to the
+    # `ninja` executable, so make the sibling venv bin directory visible when
+    # that is where the installed ninja script lives.
+    python_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+    ninja_candidate = os.path.join(python_bin_dir, "ninja")
+    if shutil.which("ninja") is None and os.path.exists(ninja_candidate):
+        path_entries = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+        if python_bin_dir not in path_entries:
+            os.environ["PATH"] = python_bin_dir if not path_entries else python_bin_dir + os.pathsep + os.environ["PATH"]
 
     candidates: list[str] = []
 
@@ -92,6 +111,26 @@ def ensure_cuda_toolkit_env() -> str | None:
     return None
 
 
+def _runtime_toolchain_status() -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "cuda_home_env": os.environ.get("CUDA_HOME"),
+        "cudacxx_env": os.environ.get("CUDACXX"),
+        "nvcc_path": shutil.which("nvcc"),
+        "ninja_path": shutil.which("ninja"),
+        "torch_cpp_extension_cuda_home": None,
+        "torch_cpp_extension_ninja_available": None,
+    }
+    try:
+        import torch.utils.cpp_extension as cpp_extension
+
+        status["torch_cpp_extension_cuda_home"] = str(cpp_extension.CUDA_HOME) if cpp_extension.CUDA_HOME else None
+        status["torch_cpp_extension_ninja_available"] = bool(cpp_extension.is_ninja_available())
+    except Exception as exc:
+        status["torch_cpp_extension_error"] = f"{type(exc).__name__}: {exc}"
+    status["jit_ready"] = bool(status.get("nvcc_path") and status.get("torch_cpp_extension_ninja_available"))
+    return status
+
+
 def compile_kernel(kernel_cu_path: str, op_name: str, build_dir: str, opt_level: str = "-O3"):
     import re
 
@@ -128,8 +167,10 @@ def compile_kernel(kernel_cu_path: str, op_name: str, build_dir: str, opt_level:
 
 _PATCH_STATE = threading.local()
 _ORIGINAL_FUNCTIONALS: dict[str, Callable[..., Any]] = {}
+_TENSOR_IADD_PATCH_KEY = "torch.Tensor.__iadd__"
+_ORIGINAL_TENSOR_IADD: Callable[..., Any] | None = None
 _ATEN_FALLBACK_CALL_RE = re.compile(
-    r"\bat::(?:adaptive_avg_pool\d*d|batch_norm|conv\d*d|linear|max_pool\d*d|relu)\s*\("
+    r"\bat::(?:adaptive_avg_pool\d*d|add|batch_norm|conv\d*d|linear|max_pool\d*d|relu)\s*\("
 )
 _KNOWN_FAST_OPS = {
     "torch_nn_functional_linear",
@@ -143,6 +184,108 @@ _FOCUS_OPS = {
     "torch_nn_functional_batch_norm",
 }
 _KERNEL_POLICIES = ("all", "skip_aten", "known_fast", "focus_ops")
+
+
+def _fresh_runtime_stats() -> dict[str, Any]:
+    return {
+        "patched_calls": 0,
+        "kernel_launches_attempted": 0,
+        "kernel_launches_succeeded": 0,
+        "kernel_launches_failed": 0,
+        "fallbacks_to_original": 0,
+        "exception_fallback_count": 0,
+        "contiguous_copy_count": 0,
+        "adaptation_count": 0,
+        "per_op": {},
+    }
+
+
+def _ensure_per_op_stats(runtime_stats: dict[str, Any] | None, op_name: str) -> dict[str, Any] | None:
+    if runtime_stats is None:
+        return None
+    per_op = runtime_stats.setdefault("per_op", {})
+    return per_op.setdefault(
+        op_name,
+        {
+            "patched_calls": 0,
+            "kernel_launches_attempted": 0,
+            "kernel_launches_succeeded": 0,
+            "kernel_launches_failed": 0,
+            "fallbacks_to_original": 0,
+            "exception_fallback_count": 0,
+            "contiguous_copy_count": 0,
+            "adaptation_count": 0,
+            "last_exception": None,
+            "fallback_reasons": {},
+            "input_devices": {},
+            "input_dtypes": {},
+            "input_is_cuda": {"true": 0, "false": 0},
+        },
+    )
+
+
+def _increment_stat(bucket: dict[str, Any] | None, key: str, amount: int = 1) -> None:
+    if bucket is None:
+        return
+    bucket[key] = int(bucket.get(key, 0)) + amount
+
+
+def _record_fallback(
+    runtime_stats: dict[str, Any] | None,
+    op_name: str,
+    reason: str,
+    *,
+    exception: Exception | None = None,
+) -> None:
+    if runtime_stats is None:
+        return
+    op_stats = _ensure_per_op_stats(runtime_stats, op_name)
+    _increment_stat(runtime_stats, "fallbacks_to_original")
+    _increment_stat(op_stats, "fallbacks_to_original")
+    if exception is not None:
+        _increment_stat(runtime_stats, "exception_fallback_count")
+        _increment_stat(op_stats, "exception_fallback_count")
+        op_stats["last_exception"] = f"{type(exception).__name__}: {exception}"
+    reasons = op_stats.setdefault("fallback_reasons", {})
+    reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+
+def _record_tensor_audit(
+    runtime_stats: dict[str, Any] | None,
+    op_name: str,
+    tensor_args: list[Any],
+) -> None:
+    if runtime_stats is None:
+        return
+    op_stats = _ensure_per_op_stats(runtime_stats, op_name)
+    if op_stats is None:
+        return
+    devices = op_stats.setdefault("input_devices", {})
+    dtypes = op_stats.setdefault("input_dtypes", {})
+    is_cuda = op_stats.setdefault("input_is_cuda", {"true": 0, "false": 0})
+    for tensor in tensor_args:
+        device = str(getattr(tensor, "device", "unknown"))
+        dtype = str(getattr(tensor, "dtype", "unknown"))
+        devices[device] = int(devices.get(device, 0)) + 1
+        dtypes[dtype] = int(dtypes.get(dtype, 0)) + 1
+        key = "true" if bool(getattr(tensor, "is_cuda", False)) else "false"
+        is_cuda[key] = int(is_cuda.get(key, 0)) + 1
+
+
+def get_runtime_stats(model: Any | None = None) -> dict[str, Any]:
+    stats = getattr(model, "_kf_runtime_stats", None)
+    if not isinstance(stats, dict):
+        return _fresh_runtime_stats()
+    return copy.deepcopy(stats)
+
+
+def reset_runtime_stats(model: Any | None = None) -> dict[str, Any]:
+    stats = getattr(model, "_kf_runtime_stats", None)
+    if not isinstance(stats, dict):
+        return _fresh_runtime_stats()
+    stats.clear()
+    stats.update(_fresh_runtime_stats())
+    return get_runtime_stats(model)
 
 
 def _patch_stack() -> list[dict[str, Callable[..., Any]]]:
@@ -188,6 +331,28 @@ def _ensure_functional_dispatch(fn_attr: str) -> Callable[..., Any] | None:
         return original(*args, **kwargs)
 
     setattr(F, fn_attr, dispatched)
+    return original
+
+
+def _ensure_tensor_iadd_dispatch() -> Callable[..., Any]:
+    import torch
+
+    global _ORIGINAL_TENSOR_IADD
+    if _ORIGINAL_TENSOR_IADD is not None:
+        return _ORIGINAL_TENSOR_IADD
+
+    original = torch.Tensor.__iadd__
+    _ORIGINAL_TENSOR_IADD = original
+
+    def dispatched(self, other):
+        stack = getattr(_PATCH_STATE, "stack", None)
+        if stack:
+            patch = stack[-1].get(_TENSOR_IADD_PATCH_KEY)
+            if patch is not None:
+                return patch(self, other)
+        return original(self, other)
+
+    torch.Tensor.__iadd__ = dispatched
     return original
 
 
@@ -250,6 +415,140 @@ def _kernel_policy_skip_reason(op_name: str, kernel_cu: str, kernel_policy: str)
     raise ValueError(f"Unknown kernel policy: {kernel_policy}")
 
 
+def _symmetric_int(value: Any, *, default: int | None = None) -> int | Any:
+    if value is None:
+        return default
+    if isinstance(value, (tuple, list)):
+        if len(value) == 1:
+            return int(value[0])
+        if len(value) == 2 and int(value[0]) == int(value[1]):
+            return int(value[0])
+        return value
+    return int(value)
+
+
+def _resolve_max_pool2d_launch_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    names = [
+        "input",
+        "kernel_size",
+        "stride",
+        "padding",
+        "dilation",
+        "ceil_mode",
+        "return_indices",
+    ]
+    resolved = {name: args[index] for index, name in enumerate(names) if index < len(args)}
+    resolved.update(kwargs)
+    if "input" not in resolved or "kernel_size" not in resolved:
+        return {"fallback_reason": "max_pool2d_missing_required_args"}
+
+    kernel_size = _symmetric_int(resolved.get("kernel_size"))
+    stride = _symmetric_int(resolved.get("stride"), default=None)
+    if stride is None:
+        stride = kernel_size
+    padding = _symmetric_int(resolved.get("padding", 0), default=0)
+    dilation = _symmetric_int(resolved.get("dilation", 1), default=1)
+    ceil_mode = bool(resolved.get("ceil_mode", False))
+    return_indices = bool(resolved.get("return_indices", False))
+
+    scalar_fields = {
+        "kernel_size": kernel_size,
+        "stride": stride,
+        "padding": padding,
+        "dilation": dilation,
+    }
+    non_scalar = [name for name, value in scalar_fields.items() if not isinstance(value, int)]
+    if non_scalar:
+        return {"fallback_reason": "max_pool2d_asymmetric_args:" + ",".join(non_scalar)}
+    if return_indices:
+        return {"fallback_reason": "max_pool2d_return_indices_unsupported"}
+
+    resolved_launch = {
+        "input": resolved["input"],
+        "kernel_size": kernel_size,
+        "stride": stride,
+        "padding": padding,
+        "dilation": dilation,
+        "ceil_mode": ceil_mode,
+        "return_indices": return_indices,
+    }
+    return {
+        "ordered": [
+            resolved_launch["input"],
+            resolved_launch["kernel_size"],
+            resolved_launch["stride"],
+            resolved_launch["padding"],
+            resolved_launch["dilation"],
+            resolved_launch["ceil_mode"],
+            resolved_launch["return_indices"],
+        ],
+        "resolved": resolved_launch,
+    }
+
+
+def _complete_functional_launch_args(
+    *,
+    op_name: str,
+    call_args: list[Any],
+    resolved_args: dict[str, Any],
+    kwargs: dict[str, Any],
+    n_launch: int | None,
+) -> list[Any]:
+    def _pool_scalar(value: Any, default: Any = None) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return default
+            first = value[0]
+            if any(item != first for item in value):
+                return value
+            return first
+        return value
+
+    if op_name == "torch_nn_functional_max_pool2d":
+        input_arg = resolved_args.get("input", call_args[0] if call_args else None)
+        kernel_size = resolved_args.get("kernel_size", call_args[1] if len(call_args) > 1 else None)
+        stride = resolved_args.get("stride", kwargs.get("stride", None))
+        padding = resolved_args.get("padding", kwargs.get("padding", 0))
+        dilation = resolved_args.get("dilation", kwargs.get("dilation", 1))
+        ceil_mode = resolved_args.get("ceil_mode", kwargs.get("ceil_mode", False))
+        return_indices = resolved_args.get("return_indices", kwargs.get("return_indices", False))
+        kernel_size = _pool_scalar(kernel_size)
+        stride = _pool_scalar(stride, kernel_size)
+        padding = _pool_scalar(padding, 0)
+        dilation = _pool_scalar(dilation, 1)
+        completed = [input_arg, kernel_size, stride, padding, dilation, bool(ceil_mode), bool(return_indices)]
+        if any(isinstance(value, (list, tuple)) for value in completed[1:5]):
+            return call_args
+        return completed[:n_launch] if n_launch is not None else completed
+
+    if op_name == "torch_nn_functional_softmax":
+        completed = list(call_args)
+        dim = resolved_args.get("dim", kwargs.get("dim"))
+        stacklevel = resolved_args.get("_stacklevel", kwargs.get("_stacklevel", 3))
+        dtype = resolved_args.get("dtype", kwargs.get("dtype"))
+        if len(completed) < 2:
+            completed.append(dim)
+        if len(completed) >= 2 and completed[1] is None:
+            return call_args
+        if len(completed) < 3:
+            completed.append(stacklevel)
+        if len(completed) >= 3 and completed[2] is None:
+            completed[2] = 3
+        if len(completed) < 4:
+            completed.append(dtype)
+        return completed[:n_launch] if n_launch is not None else completed
+    if n_launch is None or len(call_args) >= n_launch:
+        return call_args
+    if op_name == "torch_nn_functional_gelu":
+        approximate = resolved_args.get("approximate", kwargs.get("approximate", "none"))
+        if approximate is None:
+            approximate = "none"
+        return [*call_args, str(approximate)]
+    return call_args
+
+
 def _build_functional_patch(
     *,
     op_name: str,
@@ -257,40 +556,91 @@ def _build_functional_patch(
     orig_fn: Callable[..., Any],
     n_launch: int | None,
     orig_params: list[str] | None,
+    runtime_stats: dict[str, Any] | None = None,
 ) -> Callable[..., Any]:
     import torch
 
     def patched(*args, **kwargs):
+        op_stats = _ensure_per_op_stats(runtime_stats, op_name)
+        _increment_stat(runtime_stats, "patched_calls")
+        _increment_stat(op_stats, "patched_calls")
         try:
-            if orig_params is not None:
+            if op_name == "torch_nn_functional_max_pool2d":
+                max_pool_resolved = _resolve_max_pool2d_launch_args(args, kwargs)
+                fallback_reason = max_pool_resolved.get("fallback_reason")
+                if fallback_reason:
+                    _record_fallback(runtime_stats, op_name, str(fallback_reason))
+                    return orig_fn(*args, **kwargs)
+                ordered = list(max_pool_resolved["ordered"])
+                resolved = dict(max_pool_resolved["resolved"])
+                _increment_stat(runtime_stats, "adaptation_count")
+                _increment_stat(op_stats, "adaptation_count")
+            elif orig_params is not None:
                 resolved = {orig_params[i]: value for i, value in enumerate(args) if i < len(orig_params)}
                 resolved.update(kwargs)
                 ordered = [resolved.get(name) for name in orig_params]
             else:
                 ordered = list(args)
 
-            limit = n_launch if n_launch is not None else len(ordered)
-            call_args: list[Any] = []
-            tensor_args: list[torch.Tensor] = []
-            for value in ordered[:limit]:
-                if isinstance(value, torch.Tensor):
-                    tensor_args.append(value)
-                    call_args.append(value.contiguous())
-                else:
-                    call_args.append(value)
+            special_args = prepare_tinygemm_linear_launch_args(
+                op_name,
+                ordered,
+                {},
+                {"params": orig_params or []},
+            )
+            if special_args is not None:
+                call_args = special_args
+                tensor_args = [value for value in call_args if isinstance(value, torch.Tensor)]
+                _increment_stat(runtime_stats, "adaptation_count")
+                _increment_stat(op_stats, "adaptation_count")
+            else:
+                limit = n_launch if n_launch is not None else len(ordered)
+                call_args: list[Any] = []
+                tensor_args: list[torch.Tensor] = []
+                for value in ordered[:limit]:
+                    if isinstance(value, torch.Tensor):
+                        tensor_args.append(value)
+                        if not value.is_contiguous():
+                            _increment_stat(runtime_stats, "contiguous_copy_count")
+                            _increment_stat(runtime_stats, "adaptation_count")
+                            _increment_stat(op_stats, "contiguous_copy_count")
+                            _increment_stat(op_stats, "adaptation_count")
+                        call_args.append(value.contiguous())
+                    else:
+                        call_args.append(value)
+                call_args = _complete_functional_launch_args(
+                    op_name=op_name,
+                    call_args=call_args,
+                    resolved_args=resolved if orig_params is not None else {},
+                    kwargs=kwargs,
+                    n_launch=n_launch,
+                )
 
             if not tensor_args:
+                _record_fallback(runtime_stats, op_name, "no_tensor_args")
                 return orig_fn(*args, **kwargs)
 
+            _record_tensor_audit(runtime_stats, op_name, tensor_args)
+
             if any(not tensor.is_cuda for tensor in tensor_args):
+                _record_fallback(runtime_stats, op_name, "non_cuda_tensor")
                 return orig_fn(*args, **kwargs)
 
             first_device = tensor_args[0].device
             if any(tensor.device != first_device for tensor in tensor_args):
+                _record_fallback(runtime_stats, op_name, "mixed_device_tensor")
                 return orig_fn(*args, **kwargs)
 
-            return ext.launch(*call_args)
-        except Exception:
+            _increment_stat(runtime_stats, "kernel_launches_attempted")
+            _increment_stat(op_stats, "kernel_launches_attempted")
+            result = ext.launch(*call_args)
+            _increment_stat(runtime_stats, "kernel_launches_succeeded")
+            _increment_stat(op_stats, "kernel_launches_succeeded")
+            return result
+        except Exception as exc:
+            _increment_stat(runtime_stats, "kernel_launches_failed")
+            _increment_stat(op_stats, "kernel_launches_failed")
+            _record_fallback(runtime_stats, op_name, "kernel_exception", exception=exc)
             return orig_fn(*args, **kwargs)
 
     patched.__name__ = f"cast_patch_{op_name}"
@@ -328,6 +678,142 @@ class CastModelRuntime(nn.Module):
         return self(*args, **kwargs)
 
 
+def _load_model_module(module_name: str, model_py: str):
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(module_name, model_py)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to create a module spec for {model_py}")
+
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    except Exception:
+        del sys.modules[module_name]
+        raise
+    return mod
+
+
+def _resolve_model_class(mod, model_class_name: str):
+    if model_class_name and hasattr(mod, model_class_name):
+        return getattr(mod, model_class_name)
+    candidates = [
+        value for value in vars(mod).values()
+        if isinstance(value, type) and issubclass(value, nn.Module) and value.__module__ not in ("torch.nn", "builtins")
+    ]
+    return candidates[-1] if candidates else None
+
+
+def _build_model_from_class(ModelClass, manifest: dict[str, Any], model_args: dict | None, cache_dir: str):
+    model_init_args = manifest.get("model_init_args") or {}
+    model_config_file = os.path.join(cache_dir, "model_config.json")
+
+    if model_args:
+        try:
+            from transformers import AutoConfig
+
+            cfg_dict = dict(model_args)
+            model_type = cfg_dict.pop("model_type", None)
+            config = AutoConfig.for_model(model_type, **cfg_dict)
+            return ModelClass(config)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to instantiate model from --model-args: {exc}") from exc
+
+    if model_init_args:
+        return ModelClass(**model_init_args)
+
+    if os.path.exists(model_config_file):
+        try:
+            from transformers import AutoConfig
+
+            cfg_dict = json.load(open(model_config_file))
+            model_type = cfg_dict.pop("model_type", None)
+            n_labels = cfg_dict.get("num_labels")
+            if n_labels:
+                cfg_dict["id2label"] = {str(i): f"LABEL_{i}" for i in range(n_labels)}
+                cfg_dict["label2id"] = {f"LABEL_{i}": i for i in range(n_labels)}
+            config = AutoConfig.for_model(model_type, **cfg_dict)
+            return ModelClass(config)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to instantiate model from model_config.json: {exc}") from exc
+
+    return None
+
+
+def _invoke_entrypoint(fn, *, weight_file: str | None, device: str | None, model_args: dict | None):
+    signature = inspect.signature(fn)
+    params = list(signature.parameters.values())
+    accepts_var_kw = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params)
+    accepts_var_args = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in params)
+    kwargs: dict[str, Any] = {}
+
+    if model_args:
+        for key, value in model_args.items():
+            if accepts_var_kw or key in signature.parameters:
+                kwargs[key] = value
+
+    if accepts_var_kw or "device" in signature.parameters:
+        kwargs["device"] = device
+
+    args: list[Any] = []
+    if weight_file is not None:
+        positional_params = [
+            param for param in params
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if positional_params or accepts_var_args:
+            args.append(weight_file)
+
+    return fn(*args, **kwargs)
+
+
+def _first_parameter_device(model: Any) -> str | None:
+    try:
+        parameter = next(model.parameters())
+        return str(parameter.device)
+    except Exception:
+        return None
+
+
+def _has_hf_device_map(model: Any) -> bool:
+    for target in (model, getattr(model, "model", None)):
+        if target is not None and hasattr(target, "hf_device_map"):
+            return True
+    return False
+
+
+def _has_meta_parameters(model: Any) -> bool:
+    try:
+        return any(str(param.device) == "meta" for param in model.parameters())
+    except Exception:
+        return False
+
+
+def _should_skip_global_move(model: Any) -> str | None:
+    if os.environ.get("KFORGE_CAST_SKIP_GLOBAL_TO", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "KFORGE_CAST_SKIP_GLOBAL_TO"
+    if _has_hf_device_map(model):
+        return "hf_device_map_present"
+    if _has_meta_parameters(model):
+        return "meta_parameters_present"
+    return None
+
+
+def _entrypoint_device(requested_device: str | None) -> str | None:
+    if requested_device:
+        return requested_device
+    for env_name in ("KFORGE_CAST_ENTRYPOINT_DEVICE", "KFORGE_TARGET_DEVICE"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return None
+
+
 def load_cast(
     cast_path: str,
     model_args: dict | None = None,
@@ -335,9 +821,22 @@ def load_cast(
     opt_level: str = "-O3",
     device: str | None = None,
     kernel_policy: str = "all",
+    allow_jit: bool = True,
+    require_precompiled: bool = False,
+    record_runtime_stats: bool = False,
 ):
     import torch
 
+    def _file_sha256(path: str) -> str | None:
+        if not os.path.exists(path) or not os.path.isfile(path):
+            return None
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    load_started = time.perf_counter()
     cast_path = os.path.abspath(cast_path)
     cache_key = hashlib.sha256(open(cast_path, "rb").read()).hexdigest()
     cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "cast", cache_key)
@@ -372,6 +871,29 @@ def load_cast(
 
     _F_PREFIX = "torch_nn_functional_"
     functional_patches: dict[str, Callable[..., Any]] = {}
+    runtime_stats = _fresh_runtime_stats()
+    runtime_report: dict[str, Any] = {
+        "cast_path": cast_path,
+        "requested_device": device,
+        "entrypoint_device": _entrypoint_device(device),
+        "global_move_device": None,
+        "global_move_skipped_reason": None,
+        "cache_key": cache_key,
+        "cache_dir": cache_dir,
+        "kernel_policy": kernel_policy,
+        "allow_jit": bool(allow_jit),
+        "require_precompiled": bool(require_precompiled),
+        "record_runtime_stats": bool(record_runtime_stats),
+        "toolchain_status": _runtime_toolchain_status(),
+        "runtime_patch_enabled": False,
+        "selected_ops": [],
+        "loaded_kernels": [],
+        "op_reports": [],
+        "kernel_source_hashes": {},
+        "precompiled_binary_hashes": {},
+        "jit_compile_time_ms": 0.0,
+        "precompiled_load_time_ms": 0.0,
+    }
 
     if kernel_policy not in _KERNEL_POLICIES:
         raise ValueError(
@@ -381,18 +903,37 @@ def load_cast(
     for op in manifest["ops"]:
         op_name = op["name"]
         kernel_cu = os.path.join(cache_dir, op["cuda_source"])
+        op_report: dict[str, Any] = {
+            "op_name": op_name,
+            "cuda_source": op.get("cuda_source"),
+            "kernel_source_path": kernel_cu,
+            "kernel_source_hash": _file_sha256(kernel_cu),
+            "load_mode": "skipped",
+            "skip_reason": None,
+            "patch_registered": False,
+            "precompiled_binary_path": None,
+            "precompiled_binary_hash": None,
+        }
+        if op_report["kernel_source_hash"] is not None and op.get("cuda_source"):
+            runtime_report["kernel_source_hashes"][op["cuda_source"]] = op_report["kernel_source_hash"]
 
         if no_kernels:
             print(f"  [--no-kernels] Skipping kernel for {op_name}")
+            op_report["skip_reason"] = "no_kernels"
+            runtime_report["op_reports"].append(op_report)
             continue
 
         if not torch.cuda.is_available():
             print(f"  [WARN] CUDA not available — skipping kernel for {op_name}")
+            op_report["skip_reason"] = "cuda_unavailable"
+            runtime_report["op_reports"].append(op_report)
             continue
 
         skip_reason = _kernel_policy_skip_reason(op_name, kernel_cu, kernel_policy)
         if skip_reason:
             print(f"  [kernel-policy={kernel_policy}] Skipping kernel for {op_name}: {skip_reason}")
+            op_report["skip_reason"] = skip_reason
+            runtime_report["op_reports"].append(op_report)
             continue
 
         # Try precompiled .so for the current GPU first
@@ -406,34 +947,89 @@ def load_cast(
             try:
                 import importlib.util as _ilu
 
+                precompiled_started = time.perf_counter()
                 _spec = _ilu.spec_from_file_location(op_name, so_path)
                 ext = _ilu.module_from_spec(_spec)
                 _spec.loader.exec_module(ext)  # type: ignore[union-attr]
+                runtime_report["precompiled_load_time_ms"] += (time.perf_counter() - precompiled_started) * 1000.0
+                op_report["load_mode"] = "precompiled"
+                op_report["precompiled_binary_path"] = so_path
+                op_report["precompiled_binary_hash"] = _file_sha256(so_path)
+                if so_rel and op_report["precompiled_binary_hash"] is not None:
+                    runtime_report["precompiled_binary_hashes"][so_rel] = op_report["precompiled_binary_hash"]
                 print(f"  Loaded precompiled {op_name} ({gpu_sm})")
             except Exception as exc:
                 print(f"  [WARN] Failed to load precompiled {op_name} ({gpu_sm}): {exc}")
+                op_report["precompiled_load_error"] = f"{type(exc).__name__}: {exc}"
 
         if ext is None:
             if so_rel:
                 print(f"  [WARN] Precompiled .so not found for {gpu_sm}, falling back to JIT")
+            if require_precompiled:
+                raise RuntimeError(
+                    f"Precompiled kernel required for {op_name} on {gpu_sm}, but no usable shared object was available."
+                )
+            if not allow_jit:
+                raise RuntimeError(
+                    f"JIT loading is disabled and no usable precompiled kernel was available for {op_name} on {gpu_sm}."
+                )
             if not os.path.exists(kernel_cu):
                 print(f"  [WARN] No kernel.cu for {op_name}, skipping")
+                op_report["skip_reason"] = "kernel_source_missing"
+                runtime_report["op_reports"].append(op_report)
                 continue
             try:
+                jit_started = time.perf_counter()
                 ext = compile_kernel(kernel_cu, op_name, build_dir, opt_level=opt_level)
+                runtime_report["jit_compile_time_ms"] += (time.perf_counter() - jit_started) * 1000.0
+                op_report["load_mode"] = "jit"
             except Exception as exc:
                 print(f"  [WARN] Failed to prepare kernel for {op_name}, using native PyTorch: {exc}")
+                op_report["skip_reason"] = f"jit_failed: {type(exc).__name__}: {exc}"
+                runtime_report["op_reports"].append(op_report)
                 continue
+
+        if op_name == "torch_tensor_iadd":
+            original = _ensure_tensor_iadd_dispatch()
+            n_launch = _launch_arity(kernel_cu, ext)
+            functional_patches[_TENSOR_IADD_PATCH_KEY] = _build_functional_patch(
+                op_name=op_name,
+                ext=ext,
+                orig_fn=original,
+                n_launch=n_launch,
+                orig_params=["input", "other"],
+                runtime_stats=runtime_stats if record_runtime_stats else None,
+            )
+            op_report["patch_registered"] = True
+            runtime_report["selected_ops"].append(op_name)
+            runtime_report["loaded_kernels"].append(
+                {
+                    "op_name": op_name,
+                    "fn_attr": _TENSOR_IADD_PATCH_KEY,
+                    "load_mode": op_report["load_mode"],
+                    "kernel_source_path": kernel_cu,
+                    "kernel_source_hash": op_report["kernel_source_hash"],
+                    "precompiled_binary_path": op_report["precompiled_binary_path"],
+                    "precompiled_binary_hash": op_report["precompiled_binary_hash"],
+                }
+            )
+            runtime_report["op_reports"].append(op_report)
+            print(f"  Registered runtime patch torch.Tensor.__iadd__ → {op_name}")
+            continue
 
         # Generic patch: decode torch.nn.functional.<attr> from the op_name convention.
         if not op_name.startswith(_F_PREFIX):
             print(f"  [WARN] '{op_name}' does not follow torch_nn_functional_* convention, skipping patch")
+            op_report["skip_reason"] = "unsupported_op_naming"
+            runtime_report["op_reports"].append(op_report)
             continue
 
         fn_attr = op_name[len(_F_PREFIX):]
         original = _ensure_functional_dispatch(fn_attr)
         if original is None:
             print(f"  [WARN] torch.nn.functional.{fn_attr} not found, skipping patch")
+            op_report["skip_reason"] = f"functional_target_missing:{fn_attr}"
+            runtime_report["op_reports"].append(op_report)
             continue
 
         n_launch = _launch_arity(kernel_cu, ext)
@@ -451,90 +1047,118 @@ def load_cast(
             orig_fn=original,
             n_launch=n_launch,
             orig_params=orig_params,
+            runtime_stats=runtime_stats if record_runtime_stats else None,
         )
+        op_report["patch_registered"] = True
+        runtime_report["selected_ops"].append(op_name)
+        runtime_report["loaded_kernels"].append(
+            {
+                "op_name": op_name,
+                "fn_attr": fn_attr,
+                "load_mode": op_report["load_mode"],
+                "kernel_source_path": kernel_cu,
+                "kernel_source_hash": op_report["kernel_source_hash"],
+                "precompiled_binary_path": op_report["precompiled_binary_path"],
+                "precompiled_binary_hash": op_report["precompiled_binary_hash"],
+            }
+        )
+        runtime_report["op_reports"].append(op_report)
         print(f"  Registered runtime patch torch.nn.functional.{fn_attr} → {op_name}")
 
-    # 5. Load model class from model.py
-    import importlib.util
-    import sys
+    runtime_report["toolchain_status"] = _runtime_toolchain_status()
 
+    # 5. Load model implementation from model.py
     model_py = os.path.join(cache_dir, "model.py")
-    spec = importlib.util.spec_from_file_location("cast_model", model_py)
-    mod = importlib.util.module_from_spec(spec)
-    # Register before exec so inspect.getfile can resolve the module via
-    # sys.modules — without this, inspect raises "is a built-in class".
-    sys.modules["cast_model"] = mod
-    try:
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    except Exception:
-        del sys.modules["cast_model"]
-        raise
+    module_name = f"cast_model_{cache_key[:12]}"
+    mod = _load_model_module(module_name, model_py)
 
-    model_class_name = manifest.get("model_class", "")
-    if model_class_name and hasattr(mod, model_class_name):
-        ModelClass = getattr(mod, model_class_name)
-    else:
-        candidates = [
-            v for v in vars(mod).values()
-            if isinstance(v, type) and issubclass(v, nn.Module) and v.__module__ not in ("torch.nn", "builtins")
-        ]
-        if not candidates:
-            raise RuntimeError("No model class found in model.py")
-        ModelClass = candidates[-1]
+    model_class_name = str(manifest.get("model_class") or "").strip()
+    model_entrypoints = manifest.get("model_entrypoints", {}) if isinstance(manifest.get("model_entrypoints"), dict) else {}
+    build_model_fn = getattr(mod, "build_model", None) if model_entrypoints.get("build_model") or hasattr(mod, "build_model") else None
+    load_weights_fn = getattr(mod, "load_weights", None) if model_entrypoints.get("load_weights") or hasattr(mod, "load_weights") else None
+    ModelClass = _resolve_model_class(mod, model_class_name)
 
-    print(f"  Model class: {ModelClass.__name__}")
+    model = None
+    model_load_strategy = None
+    weight_relpath = str(manifest.get("weight_file") or "").strip()
+    weight_file = os.path.join(cache_dir, weight_relpath) if weight_relpath else None
 
-    # 6. Instantiate model
-    model_init_args = manifest.get("model_init_args") or {}
-    model_config_file = os.path.join(cache_dir, "model_config.json")
-    if model_args:
-        # CLI override: --model-args '{"model_type": "resnet", ...}'
-        try:
-            from transformers import AutoConfig
-            cfg_dict = dict(model_args)
-            model_type = cfg_dict.pop("model_type", None)
-            config = AutoConfig.for_model(model_type, **cfg_dict)
-            model = ModelClass(config)
-        except Exception as e:
-            raise RuntimeError(f"Failed to instantiate model from --model-args: {e}") from e
-    elif model_init_args:
-        model = ModelClass(**model_init_args)
-    elif os.path.exists(model_config_file):
-        # HuggingFace model — load config from the bundled model_config.json
-        try:
-            from transformers import AutoConfig
-            cfg_dict = json.load(open(model_config_file))
-            model_type = cfg_dict.pop("model_type", None)
-            # Rebuild id2label/label2id to be consistent with num_labels so
-            # HuggingFace doesn't override num_labels with len(id2label).
-            n = cfg_dict.get("num_labels")
-            if n:
-                cfg_dict["id2label"] = {str(i): f"LABEL_{i}" for i in range(n)}
-                cfg_dict["label2id"] = {f"LABEL_{i}": i for i in range(n)}
-            config = AutoConfig.for_model(model_type, **cfg_dict)
-            model = ModelClass(config)
-        except Exception as e:
-            raise RuntimeError(f"Failed to instantiate model from model_config.json: {e}") from e
-    else:
+    if ModelClass is not None:
+        print(f"  Model class: {ModelClass.__name__}")
+        model = _build_model_from_class(ModelClass, manifest, model_args, cache_dir)
+        if model is not None:
+            model_load_strategy = "model_class"
+            if weight_file:
+                import torch
+
+                print(f"  Loading weights from {weight_relpath} ...")
+                state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
+                model.load_state_dict(state_dict)
+
+    if model is None and callable(load_weights_fn):
+        print("  Loading model via model.py::load_weights(...)")
+        model = _invoke_entrypoint(
+            load_weights_fn,
+            weight_file=weight_file or "",
+            device=runtime_report["entrypoint_device"],
+            model_args=model_args,
+        )
+        model_load_strategy = "load_weights"
+
+    if model is None and callable(build_model_fn):
+        print("  Loading model via model.py::build_model(...)")
+        model = _invoke_entrypoint(
+            build_model_fn,
+            weight_file=None,
+            device=device,
+            model_args=model_args,
+        )
+        model_load_strategy = "build_model"
+
+    if model is None:
         raise RuntimeError(
-            "Cannot instantiate model: no model_init_args in manifest and "
-            "no model_config.json bundled in the .cast file.\n"
-            "Pass --model-args '{\"model_type\": ...}' or re-export with a "
-            "model_config.json saved alongside model.py in the project."
+            "Cannot instantiate model from the .cast package. "
+            "Expected a loadable model_class or model.py build_model/load_weights entrypoint."
         )
 
-    # 7. Load weights
-    import torch
-    weight_file = os.path.join(cache_dir, manifest["weight_file"])
-    print(f"  Loading weights from {manifest['weight_file']} ...")
-    state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
-    model.load_state_dict(state_dict)
+    if not isinstance(model, nn.Module):
+        raise RuntimeError(f"Loaded object from .cast is not an nn.Module: {type(model).__name__}")
+
     model.eval()
 
     runtime_model = CastModelRuntime(model, functional_patches)
     runtime_model.eval()
     if device:
-        runtime_model = runtime_model.to(device)
+        skip_global_move_reason = _should_skip_global_move(model)
+        if skip_global_move_reason:
+            runtime_report["global_move_skipped_reason"] = skip_global_move_reason
+        else:
+            runtime_model = runtime_model.to(device)
+            runtime_report["global_move_device"] = device
+
+    runtime_report["runtime_patch_enabled"] = bool(functional_patches)
+    runtime_report["load_modes"] = {
+        entry["op_name"]: entry.get("load_mode")
+        for entry in runtime_report["op_reports"]
+    }
+    runtime_report["selected_ops"] = sorted(dict.fromkeys(runtime_report["selected_ops"]))
+    runtime_report["runtime_load_time_ms"] = (time.perf_counter() - load_started) * 1000.0
+    runtime_report["setup_time_ms"] = max(
+        float(runtime_report["runtime_load_time_ms"]) - float(runtime_report["jit_compile_time_ms"]),
+        0.0,
+    )
+    runtime_report["model_load_strategy"] = model_load_strategy
+    runtime_report["first_parameter_device"] = _first_parameter_device(runtime_model)
+    runtime_report["hf_device_map"] = getattr(model, "hf_device_map", None)
+    runtime_report["model_entrypoints"] = {
+        "model_class": model_class_name,
+        "build_model": bool(callable(build_model_fn)),
+        "load_weights": bool(callable(load_weights_fn)),
+    }
+
+    runtime_model._kf_runtime_report = runtime_report
+    runtime_model._kf_runtime_stats = runtime_stats
+    runtime_model._kf_runtime_stats_recording_enabled = bool(record_runtime_stats)
 
     return runtime_model
 

@@ -53,11 +53,43 @@ def:pub _ensure_catalog_schema() -> None {
             forged_ms REAL,
             winner TEXT,
             total_time_ms REAL NOT NULL DEFAULT 0,
+            pytorch_total_ms REAL,
+            forged_total_ms REAL,
+            unique_cases INTEGER,
+            timing_source TEXT,
+            mixed_choice TEXT,
+            runtime_responsibility REAL,
+            metric_arm TEXT,
             updated_at TEXT,
             PRIMARY KEY (project_name, op_name)
         )
         """
     );
+    try {
+        cursor.execute("PRAGMA table_info(operator_metrics)");
+        metric_cols = {};
+        for col in cursor.fetchall() {
+            if col and len(col) > 1 and col[1] {
+                metric_cols[str(col[1])] = True;
+            }
+        }
+        metric_migrations = {
+            "pytorch_total_ms": "ALTER TABLE operator_metrics ADD COLUMN pytorch_total_ms REAL",
+            "forged_total_ms": "ALTER TABLE operator_metrics ADD COLUMN forged_total_ms REAL",
+            "unique_cases": "ALTER TABLE operator_metrics ADD COLUMN unique_cases INTEGER",
+            "timing_source": "ALTER TABLE operator_metrics ADD COLUMN timing_source TEXT",
+            "mixed_choice": "ALTER TABLE operator_metrics ADD COLUMN mixed_choice TEXT",
+            "runtime_responsibility": "ALTER TABLE operator_metrics ADD COLUMN runtime_responsibility REAL",
+            "metric_arm": "ALTER TABLE operator_metrics ADD COLUMN metric_arm TEXT"
+        };
+        for col_name in metric_migrations {
+            if not (col_name in metric_cols) {
+                cursor.execute(metric_migrations[col_name]);
+            }
+        }
+    } except Exception as e {
+        print(f"Warning: failed to migrate operator_metrics schema: {e}");
+    }
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS project_metric_meta (
@@ -350,6 +382,9 @@ def:pub _write_project_run_state_db(project_name: str, state: dict) -> None {
     conn.close();
     for job_key in state {
         job_state = state[job_key];
+        if not isinstance(job_state, dict) {
+            continue;
+        }
         if not job_state or not ("status" in job_state) {
             continue;
         }
@@ -529,12 +564,60 @@ def:pub _upsert_project_metric_rows(project_name: str, payload: dict) -> None {
             total_time_ms = 0.0;
         }
         winner = str(row["winner"]) if "winner" in row and row["winner"] else "";
+        pytorch_total_ms = None;
+        if "pytorch_total_ms" in row and row["pytorch_total_ms"] is not None {
+            try {
+                pytorch_total_ms = float(row["pytorch_total_ms"]);
+            } except Exception {
+                pytorch_total_ms = None;
+            }
+        }
+        forged_total_ms = None;
+        if "forged_total_ms" in row and row["forged_total_ms"] is not None {
+            try {
+                forged_total_ms = float(row["forged_total_ms"]);
+            } except Exception {
+                forged_total_ms = None;
+            }
+        }
+        unique_cases = None;
+        if "unique_cases" in row and row["unique_cases"] is not None {
+            try {
+                unique_cases = int(row["unique_cases"]);
+            } except Exception {
+                unique_cases = None;
+            }
+        }
+        timing_source = (
+            str(row["timing_source"])
+            if "timing_source" in row and row["timing_source"]
+            else ""
+        );
+        mixed_choice = (
+            str(row["mixed_choice"])
+            if "mixed_choice" in row and row["mixed_choice"]
+            else ""
+        );
+        runtime_responsibility = None;
+        if "runtime_responsibility" in row and row["runtime_responsibility"] is not None {
+            try {
+                runtime_responsibility = float(row["runtime_responsibility"]);
+            } except Exception {
+                runtime_responsibility = None;
+            }
+        }
+        metric_arm = (
+            str(row["metric_arm"])
+            if "metric_arm" in row and row["metric_arm"]
+            else ""
+        );
         cursor.execute(
             """
             INSERT OR REPLACE INTO operator_metrics(
                 project_name, op_name, op_count, pytorch_ms, forged_ms, winner,
-                total_time_ms, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                total_time_ms, pytorch_total_ms, forged_total_ms, unique_cases,
+                timing_source, mixed_choice, runtime_responsibility, metric_arm, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_name,
@@ -544,6 +627,13 @@ def:pub _upsert_project_metric_rows(project_name: str, payload: dict) -> None {
                 forged_ms,
                 winner,
                 total_time_ms,
+                pytorch_total_ms,
+                forged_total_ms,
+                unique_cases,
+                timing_source,
+                mixed_choice,
+                runtime_responsibility,
+                metric_arm,
                 now
             )
         );
@@ -576,7 +666,9 @@ def:pub _read_project_metric_rows(project_name: str) -> dict {
     cursor = conn.cursor();
     cursor.execute(
         """
-        SELECT op_name, op_count, pytorch_ms, forged_ms, winner, total_time_ms
+        SELECT op_name, op_count, pytorch_ms, forged_ms, winner, total_time_ms,
+               pytorch_total_ms, forged_total_ms, unique_cases, timing_source,
+               mixed_choice, runtime_responsibility, metric_arm
         FROM operator_metrics
         WHERE project_name = ?
         ORDER BY op_name
@@ -641,6 +733,41 @@ def:pub _read_project_metric_rows(project_name: str) -> dict {
         } except Exception {
             total_time_ms = 0.0;
         }
+        pytorch_total_ms = None;
+        if len(m) > 6 and m[6] is not None {
+            try {
+                pytorch_total_ms = float(m[6]);
+            } except Exception {
+                pytorch_total_ms = None;
+            }
+        }
+        forged_total_ms = None;
+        if len(m) > 7 and m[7] is not None {
+            try {
+                forged_total_ms = float(m[7]);
+            } except Exception {
+                forged_total_ms = None;
+            }
+        }
+        unique_cases = None;
+        if len(m) > 8 and m[8] is not None {
+            try {
+                unique_cases = int(m[8]);
+            } except Exception {
+                unique_cases = None;
+            }
+        }
+        timing_source = str(m[9]) if len(m) > 9 and m[9] else "";
+        mixed_choice = str(m[10]) if len(m) > 10 and m[10] else "";
+        runtime_responsibility = None;
+        if len(m) > 11 and m[11] is not None {
+            try {
+                runtime_responsibility = float(m[11]);
+            } except Exception {
+                runtime_responsibility = None;
+            }
+        }
+        metric_arm = str(m[12]) if len(m) > 12 and m[12] else "";
 
         row = {
             "name": op_name,
@@ -654,22 +781,76 @@ def:pub _read_project_metric_rows(project_name: str) -> dict {
         if forged_ms is not None {
             row["forged_ms"] = forged_ms;
         }
+        if pytorch_total_ms is not None {
+            row["pytorch_total_ms"] = pytorch_total_ms;
+        }
+        if forged_total_ms is not None {
+            row["forged_total_ms"] = forged_total_ms;
+        }
+        if unique_cases is not None {
+            row["unique_cases"] = unique_cases;
+        }
+        if timing_source {
+            row["timing_source"] = timing_source;
+        }
+        if mixed_choice {
+            row["mixed_choice"] = mixed_choice;
+        }
+        if runtime_responsibility is not None {
+            row["runtime_responsibility"] = runtime_responsibility;
+        }
+        if metric_arm {
+            row["metric_arm"] = metric_arm;
+        }
 
         rows.append(row);
         rows_by_op[op_name] = row;
 
         if pytorch_ms is not None {
             srow = {"name": op_name, "pytorch": pytorch_ms};
+            if pytorch_total_ms is not None {
+                srow["pytorch_total_ms"] = pytorch_total_ms;
+            }
             if forged_ms is not None {
                 srow["forged"] = forged_ms;
                 srow["optimized"] = forged_ms;
             }
+            if forged_total_ms is not None {
+                srow["forged_total_ms"] = forged_total_ms;
+                srow["optimized_total_ms"] = forged_total_ms;
+            }
+            if count > 0 {
+                srow["trace_calls"] = count;
+            }
+            if unique_cases is not None {
+                srow["unique_cases"] = unique_cases;
+            }
+            if timing_source {
+                srow["timing_source"] = timing_source;
+            }
+            if mixed_choice {
+                srow["mixed_choice"] = mixed_choice;
+            }
+            if runtime_responsibility is not None {
+                srow["runtime_responsibility"] = runtime_responsibility;
+            }
+            if metric_arm {
+                srow["metric_arm"] = metric_arm;
+            }
             speed_comparison.append(srow);
         }
         if total_time_ms > 0.0 {
-            operator_usage.append(
-                {"name": op_name, "count": count, "total_time_ms": total_time_ms}
-            );
+            usage_row = {"name": op_name, "count": count, "total_time_ms": total_time_ms};
+            if pytorch_total_ms is not None {
+                usage_row["pytorch_total_ms"] = pytorch_total_ms;
+            }
+            if forged_total_ms is not None {
+                usage_row["forged_total_ms"] = forged_total_ms;
+            }
+            if timing_source {
+                usage_row["timing_source"] = timing_source;
+            }
+            operator_usage.append(usage_row);
         }
     }
 

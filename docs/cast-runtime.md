@@ -1,17 +1,21 @@
 # `kernelforge/run_cast.py` Reference
 
-`kernelforge/run_cast.py` is the standalone runtime loader for KernelForge `.cast` inference packages. It requires only `torch` and no KernelForge installation.
+`kernelforge/run_cast.py` is the runtime loader for KernelForge `.cast` inference packages. It requires `torch` and this KernelForge checkout or package.
 
 ## CLI
 
 ```
 python3 kernelforge/run_cast.py <file>.cast [options]
+# or
+python -m kernelforge.run_cast <file>.cast [options]
 
 Options:
   --device cuda|cpu     Target device (default: cuda if available)
   --runs N              Number of timed inference passes (default: 5)
   --no-kernels          Skip kernel loading, run with native PyTorch ops
-  --opt-level -O0..-O3  NVCC optimisation level for JIT fallback (default: -O0)
+  --opt-level -O0..-O3  NVCC optimisation level for JIT fallback (default: -O3)
+  --kernel-policy POLICY
+                        all, skip_aten, known_fast, or focus_ops
   --model-args JSON     JSON config string for model instantiation
                         e.g. '{"model_type":"resnet","num_labels":1000}'
                         Used when .cast has no model_config.json
@@ -31,7 +35,7 @@ JIT compilation uses `load_inline` (not `load()`): splits the kernel into a tiny
 
 - Op patching is hardcoded per op name. A generic dispatch mechanism via `torch.library` under the `cast::` namespace is the intended next step.
 - Precompiled binaries are SM-specific. A `.cast` exported on sm_75 falls back to JIT on sm_80. Bundle multiple SM targets by exporting from different GPUs.
-- `loader.py` inside the archive is a stub (reserved for `zipimport`-based loading without installing `kernelforge/run_cast.py`).
+- `loader.py` inside the archive is a stub. Use `kernelforge/run_cast.py` or `python -m kernelforge.run_cast`.
 - `wrapper.py` inside the archive is a stub (reserved for a future `torch.library`-based dispatch wrapper).
 
 ## Format spec

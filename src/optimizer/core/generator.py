@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 from typing import Tuple
 
+import json
 import os
 
 from src.llm_tools import GenModel
@@ -15,7 +16,7 @@ from src.config import ensure_llm_config
 from src.optimizer.core.types import GPUSpecs
 from src.optimizer.config.settings import settings
 from src.optimizer.core.backend import Backend
-from src.llm.usage_db import log_llm_call
+from src.llm.usage_db import log_llm_call, project_usage_dir_from_op_dir
 import src.optimizer.core.mcts as mcts
 
 
@@ -54,6 +55,77 @@ def _log_attempt_result(paths: dict[Path], status: str, reason: str = "") -> Non
     if short_reason:
         line += f" reason={short_reason}"
     print(line)
+
+
+def _error_type(error: str) -> str:
+    text = str(error or "")
+    if "[Compilation Failed]" in text:
+        return "CompilationFailed"
+    if "[Python Error]" in text:
+        return "PythonError"
+    if "[CUDA Error]" in text:
+        return "CUDAError"
+    if text:
+        return "ValidationFailed"
+    return "Unknown"
+
+
+def _append_history_entry(
+    paths: dict[Path],
+    *,
+    prompt: str,
+    response: str,
+    code: str | None,
+    is_valid: bool,
+    error: str | None,
+) -> None:
+    chain = paths.get("history_chain")
+    if not isinstance(chain, list):
+        return
+    attempt = int(paths.get("attempt", 0) or 0)
+    chain.append(
+        {
+            "role": "initial" if attempt == 0 else "fix",
+            "attempt": attempt,
+            "prompt": prompt,
+            "is_valid": bool(is_valid),
+            "error_type": None if is_valid else _error_type(str(error or "")),
+            "error_details": "" if is_valid else str(error or ""),
+            "llm_response_code": code or "",
+            "llm_response": response or "",
+        }
+    )
+
+
+def _write_generation_history(
+    paths: dict[Path],
+    *,
+    node_id: int,
+    system_prompt: str,
+    final_outcome: str,
+    attempts_to_correct: int,
+) -> None:
+    proj_dir = paths.get("proj_dir")
+    if not proj_dir:
+        return
+    try:
+        kernels_dir = proj_dir / "kernels"
+        kernels_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "node_id": int(node_id),
+            "phase": "optimizer",
+            "op_name": _current_op_name(paths),
+            "final_outcome": final_outcome,
+            "attempts_to_correct": int(attempts_to_correct),
+            "system_prompt": system_prompt,
+            "chain": list(paths.get("history_chain") or []),
+        }
+        (kernels_dir / f"history_{node_id}.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"\t\t- Failed to save generation history: {e}")
 
 
 def _dump_failed_llm_response(paths: dict[Path], response: str, tag: str) -> None:
@@ -154,16 +226,19 @@ def create_and_validate(backend: Backend, llm: GenModel, msg: str, model: str, p
         Tuple[str, bool, str]: _description_
     """
     _attempt = paths.get("attempt", 0)
-    llm.set_usage_context(
-        step_type="generation" if _attempt == 0 else "correction",
-        iteration=paths.get("iteration"),
-        attempt=int(_attempt) + 1,
-    )
+    set_usage_context = getattr(llm, "set_usage_context", None)
+    if callable(set_usage_context):
+        set_usage_context(
+            step_type="generation" if _attempt == 0 else "correction",
+            iteration=paths.get("iteration"),
+            attempt=int(_attempt) + 1,
+        )
     response = llm.chat(msg, model)
     op_proj_dir = paths.get("proj_dir") if isinstance(paths, dict) else None
-    if op_proj_dir is not None and getattr(llm, "last_usage", None):
+    project_usage_dir = project_usage_dir_from_op_dir(op_proj_dir)
+    if project_usage_dir is not None and getattr(llm, "last_usage", None):
         log_llm_call(
-            op_proj_dir.parent,
+            project_usage_dir,
             llm.last_usage,
             step_type="optimize",
             job_key=os.environ.get("KFORGE_JOB_KEY"),
@@ -178,6 +253,14 @@ def create_and_validate(backend: Backend, llm: GenModel, msg: str, model: str, p
 
     if cu_code is None:
         reason = "Failed to extract code from LLM response"
+        _append_history_entry(
+            paths,
+            prompt=msg,
+            response=response,
+            code=None,
+            is_valid=False,
+            error=reason,
+        )
         _dump_failed_llm_response(paths, response, "extract_failed")
         _log_attempt_result(paths, "failed", reason)
         return feedback, False, reason
@@ -220,6 +303,14 @@ def create_and_validate(backend: Backend, llm: GenModel, msg: str, model: str, p
                 print(f"\t\t- Failed to save garbage error log: {e}")
     else:
         _log_attempt_result(paths, "success", "")
+    _append_history_entry(
+        paths,
+        prompt=msg,
+        response=response,
+        code=cu_code,
+        is_valid=is_valid,
+        error=error,
+    )
     return feedback, is_valid, error
 
 
@@ -273,11 +364,19 @@ def generate(backend: Backend, best_kernel_code: str, gpu_specs: GPUSpecs, impro
 
     paths["attempt"] = 0
     paths["iteration"] = next_node_id
+    paths["history_chain"] = []
     if status_callback:
         status_callback("Generating", 1)
     attempts_used = 1
     feedback, is_valid, error = create_and_validate(backend, llm, msg, model, paths, ssh_config, status_callback)
     if is_valid:
+        _write_generation_history(
+            paths,
+            node_id=next_node_id,
+            system_prompt=sys_prompt,
+            final_outcome="success",
+            attempts_to_correct=attempts_used,
+        )
         return feedback, True, "", attempts_used
     print("\t\tInitial gen failed...")
     last_error = str(error) if error else ""
@@ -290,10 +389,24 @@ def generate(backend: Backend, best_kernel_code: str, gpu_specs: GPUSpecs, impro
         attempts_used = i + 2
         retry_feedback, is_valid, error = create_and_validate(backend, llm, error, model, paths, ssh_config, status_callback)
         if is_valid:
+            _write_generation_history(
+                paths,
+                node_id=next_node_id,
+                system_prompt=sys_prompt,
+                final_outcome="success",
+                attempts_to_correct=attempts_used,
+            )
             return retry_feedback, True, "", attempts_used
         if error:
             last_error = str(error)
 
     if not last_error:
         last_error = "No valid kernel produced after retries."
+    _write_generation_history(
+        paths,
+        node_id=next_node_id,
+        system_prompt=sys_prompt,
+        final_outcome="failed",
+        attempts_to_correct=attempts_used,
+    )
     return "", False, last_error, attempts_used

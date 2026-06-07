@@ -13,16 +13,16 @@ def:pub WorkbenchNodeDetails(props: any) -> Any {
             else "mean_time_ms"
     );
     value_label = (
-        "Median Runtime (ms)"
+        "Median Runtime (debug)"
             if timing_metric == "median_time_ms"
             else (
-                "Average Runtime (ms)"
+                "Average Runtime (debug)"
                     if timing_metric == "mean_time_ms"
                     else "Stored Runtime (legacy)"
             )
     );
     subtree_label = (
-        "Best Subtree Runtime (ms)"
+        "Best Subtree Runtime (debug)"
             if timing_metric == "median_time_ms"
             or timing_metric == "mean_time_ms"
             else "Best Subtree Value"

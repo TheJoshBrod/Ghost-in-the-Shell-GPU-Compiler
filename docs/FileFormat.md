@@ -196,9 +196,9 @@ The project `config.json` is included verbatim **except**:
 
 ### Purpose
 
-A `.cast` file is a **self-contained, deployable inference artifact**. It bundles a trained model's weights with the KernelForge-optimized CUDA kernels that replace its hot-path operators. Anyone with the `cast` Python runtime can load a `.cast` file and run inference immediately — no KernelForge installation required.
+A `.cast` file is a **deployable inference artifact**. It bundles a trained model's weights with the KernelForge-optimized CUDA kernels that replace its hot-path operators. It is loaded with the KernelForge runtime helper in `kernelforge/run_cast.py`.
 
-`.cast` files are produced by KernelForge and consumed by the `cast` runtime package (pip-installable, lightweight, depends only on `torch`).
+`.cast` files are produced by KernelForge and consumed by the runtime helper in this repository. The runtime depends on `torch` and JIT-compiles CUDA sources when no matching precompiled binary is present.
 
 ### Internal Layout
 
@@ -217,7 +217,7 @@ my_model.cast  (ZIP)
 ├── kernels/
 │   └── <op_name>/
 │       ├── kernel.cu                  ← CUDA source (portable, JIT-compiled on target)
-│       └── wrapper.py                 ← Python dispatch glue for torch.library registration
+│       └── wrapper.py                 ← stub reserved for future dispatch glue
 │
 ├── compiled/                          ← optional; pre-compiled binaries per SM version
 │   ├── sm_80/
@@ -227,7 +227,7 @@ my_model.cast  (ZIP)
 │   └── sm_89/
 │       └── <op_name>.so
 │
-└── loader.py                          ← vendored cast runtime (fallback, no pip required)
+└── loader.py                          ← stub reserved for a future vendored runtime
 ```
 
 ### `HEADER.json` Schema
@@ -286,24 +286,16 @@ my_model.cast  (ZIP)
 
 If the model class `__init__` requires arguments beyond the default, they are stored here as a JSON-serializable dict. On load, the model is instantiated as `ModelClass(**model_init_args)` before `load_state_dict` is called. If the model can be reconstructed from the state dict alone (e.g., all architecture info is implied by weight shapes), this field is an empty object.
 
-### `loader.py` (Vendored Runtime)
+### `loader.py` and `wrapper.py`
 
-Every `.cast` file embeds a copy of the `cast` runtime as `loader.py`. This allows loading without a pip installation using Python's `zipimport`:
+Current `.cast` files include `loader.py` and per-op `wrapper.py` files as reserved stubs. They document where a future vendored runtime and `torch.library` dispatch wrappers will live, but they are not executable runtime modules today.
 
-```python
-import zipimport
-importer = zipimport.zipimporter("my_model.cast")
-cast = importer.load_module("loader")
-model = cast.load("my_model.cast")
-output = model(input_tensor)
-```
-
-The vendored `loader.py` is functionally identical to the pip-installed `cast` package at the version embedded. The pip package is preferred when available; `loader.py` is a zero-dependency fallback.
+Use `python3 kernelforge/run_cast.py my_model.cast` or `python -m kernelforge.run_cast my_model.cast` from a KernelForge checkout.
 
 ### Load Flow (`.cast` → inference)
 
 ```
-cast.load("my_model.cast")
+load_cast("my_model.cast")
     │
     ├── 1. Read HEADER.json
     │       Validate format_version and file_type == "kernelforge_inference"
@@ -324,9 +316,9 @@ cast.load("my_model.cast")
     │
     ├── 6. For each op in manifest["ops"]:
     │       a. If precompiled .so exists for current SM → dlopen it
-    │       b. Else → JIT compile kernel.cu via torch.utils.cpp_extension.load()
+    │       b. Else → JIT compile kernel.cu via torch.utils.cpp_extension.load_inline()
     │              Compilation artifacts cached in cache dir
-    │       c. Register op with torch.library under namespace "cast"
+    │       c. Patch supported PyTorch call sites while the runtime wrapper is active
     │
     ├── 7. Import model class from model.py (exec into isolated namespace)
     │
@@ -334,20 +326,16 @@ cast.load("my_model.cast")
     │
     ├── 9. torch.load(weight_file) → model.load_state_dict(state_dict)
     │
-    ├── 10. Wrap model.forward() to route registered ops through cast:: dispatch
+    ├── 10. Wrap model.forward() so supported PyTorch call sites use CAST patches
     │
     └── 11. Return model — ready for inference
 ```
 
-#### Kernel Registration
+#### Runtime Dispatch
 
-Optimized kernels are registered with PyTorch's custom operator system under the `cast` namespace:
-
-```
-cast::<op_name>(Tensor self, ...) -> Tensor
-```
-
-The dispatch wrapper in `wrapper.py` replaces the original `torch.nn.functional.*` call at the Python level using a monkey-patch applied during model wrapping (step 10). This requires no changes to `model.py` or the calling code.
+The current runtime applies Python-level patches for supported `torch.nn.functional.*`,
+top-level `torch.*`, and tensor-method call sites while the wrapped model runs. The
+`wrapper.py` files inside the archive are reserved stubs for a future dispatch layer.
 
 #### Compilation Fallback Order
 
@@ -355,7 +343,7 @@ The dispatch wrapper in `wrapper.py` replaces the original `torch.nn.functional.
 |----------|-----------|--------|
 | 1 | Pre-compiled `.so` for exact SM version exists | Load directly, no compilation |
 | 2 | Pre-compiled `.so` for compatible SM version exists (lower SM, same major) | Load with warning |
-| 3 | `kernel.cu` source present | JIT compile via `torch.utils.cpp_extension.load()` |
+| 3 | `kernel.cu` source present | JIT compile via `torch.utils.cpp_extension.load_inline()` |
 | 4 | None of the above | Skip kernel for this op, fall back to native PyTorch |
 
 ### What Is Excluded
@@ -395,11 +383,11 @@ When importing a `.cast`, KernelForge will:
 | Container | ZIP | ZIP |
 | First entry | `HEADER.json` | `HEADER.json` |
 | `file_type` | `kernelforge_project` | `kernelforge_inference` |
-| Requires KernelForge to use | Yes (import) | No |
+| Requires KernelForge to use | Yes (import) | Yes (runtime helper) |
 | Runnable for inference | No | Yes |
 | Includes profiling tensors | Yes | No |
 | Includes MCTS trees | Optional (`full` mode) | No |
 | Includes pre-compiled `.so` | No | Optional |
-| Embeds runtime loader | No | Yes (`loader.py`) |
+| Embeds runtime loader | No | Stub only (`loader.py`) |
 | Primary audience | KernelForge users | Deployment / end users |
 | Re-importable into KernelForge | Yes (full restore) | Yes (partial restore) |

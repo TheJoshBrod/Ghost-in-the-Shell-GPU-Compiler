@@ -31,6 +31,7 @@ import src.generator.templates as templates
 from src.optimizer.backends.cuda import CUDABackend
 from src.optimizer.backends.triton import TritonBackend
 from src.optimizer.pipeline import update_queue_state
+from src.optimizer.profile_replay import normalize_profile_call_args
 from src.progress import update_job_progress, wait_if_paused, check_cancelled
 from src.llm.usage_db import log_llm_call
 try:
@@ -203,6 +204,19 @@ def _load_op_counts(io_dir: Path) -> dict:
     if not isinstance(counts, dict):
         return {}
     return {_normalize_op_name(k): int(v) for k, v in counts.items()}
+
+
+_TENSOR_METHOD_FUNCTION_PREFIX = "torch.tensor."
+
+
+def _monitor_exec_for_function(function_name: str) -> str:
+    if function_name == "torch.tensor.iadd":
+        return "torch.add(*args, **kwargs)"
+    if function_name.startswith(_TENSOR_METHOD_FUNCTION_PREFIX):
+        method_name = function_name.replace(_TENSOR_METHOD_FUNCTION_PREFIX, "", 1)
+        if method_name.isidentifier():
+            return f"getattr(args[0], {method_name!r})(*args[1:], **kwargs)"
+    return f"{function_name}(*args, **kwargs)"
 
 
 def _write_failure_report(
@@ -603,8 +617,7 @@ def process_function(
     # Load first call to set up context for profiling
     first_call = torch.load(
         entry_files[0], map_location='cpu', weights_only=False)
-    first_args = first_call.get("args", [])
-    first_kwargs = first_call.get("kwargs", {})
+    first_args, first_kwargs = normalize_profile_call_args(first_call)
 
     # Extract function name out of directory name
     function_name = first_call.get("function_name")
@@ -619,7 +632,7 @@ def process_function(
         "kwargs": first_kwargs,
     }
     print(function_name)
-    exec_str = f"{function_name}(*args, **kwargs)"
+    exec_str = _monitor_exec_for_function(function_name)
 
     # Set up GenModel
     sys_prompt = prompts.get_system_prompt()
@@ -988,8 +1001,14 @@ def main():
             except Exception:
                 pass
         elif not success:
-            # Track for cleanup at the start of the next op (M5).
-            failed_task_keys.append("gen_" + op_key)
+            if project_dir:
+                update_queue_state(project_dir, {"active_tasks": {"gen_" + op_key: {
+                    "tag": "[GEN]",
+                    "op_name": op_key,
+                    "current_step": "Failed",
+                    "status": "Failed",
+                    "result": "kernel failed validation/compile",
+                }}})
         if check_cancelled():
             print("Generation cancelled.")
             return

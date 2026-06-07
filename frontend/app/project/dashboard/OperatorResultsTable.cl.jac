@@ -3,6 +3,16 @@
 import from react { useState }
 import from ..shared.MetricsAdapter { list_len, to_list }
 
+def _index_list(count: int) -> list {
+    out = [];
+    idx = 0;
+    while idx < count {
+        out.push(idx);
+        idx = idx + 1;
+    }
+    return out;
+}
+
 def:pub OperatorResultsTable(props: any) -> Any {
     operatorRows = props.operatorRows;
     name = props.name;
@@ -26,6 +36,7 @@ def:pub OperatorResultsTable(props: any) -> Any {
 
     [sortColumn, setSortColumn] = useState("display_order");
     [sortDirection, setSortDirection] = useState("asc");
+    [showRuntimeMajorOnly, setShowRuntimeMajorOnly] = useState(False);
 
     def handleSort(column: str) -> None {
         if sortColumn == column {
@@ -43,8 +54,19 @@ def:pub OperatorResultsTable(props: any) -> Any {
         return <span className="text-zinc-300 ml-1">{ "↓" if sortDirection == "desc" else "↑" }</span>;
     }
 
-    # Sort the rows before rendering
-    sortedRows = to_list(operatorRows);
+    sortedRows = [];
+    for row in to_list(operatorRows) {
+        if not row {
+            continue;
+        }
+        if showRuntimeMajorOnly {
+            pct_raw = row["runtime_pct_raw"] if "runtime_pct_raw" in row and row["runtime_pct_raw"] != None else 0.0;
+            if pct_raw < 1.0 {
+                continue;
+            }
+        }
+        sortedRows.push(row);
+    }
     sortedRows.sort(lambda a: dict, b: dict -> int {
         if not a and not b { return 0; }
         if not a { return 1; }
@@ -63,11 +85,8 @@ def:pub OperatorResultsTable(props: any) -> Any {
             valA = a["baseline_raw"] if "baseline_raw" in a else 0.0;
             valB = b["baseline_raw"] if "baseline_raw" in b else 0.0;
         } elif sortColumn == "runtime_pct" {
-            # Parse runtime_pct string to number for sorting ("<0.1%" -> 0, "12.5%" -> 12.5)
-            pctA = a["runtime_pct"] if "runtime_pct" in a else "0";
-            pctB = b["runtime_pct"] if "runtime_pct" in b else "0";
-            valA = 0.0 if pctA == "<0.1%" or pctA == "--" else parseFloat(pctA.replace("%", ""));
-            valB = 0.0 if pctB == "<0.1%" or pctB == "--" else parseFloat(pctB.replace("%", ""));
+            valA = a["runtime_pct_raw"] if "runtime_pct_raw" in a and a["runtime_pct_raw"] != None else 0.0;
+            valB = b["runtime_pct_raw"] if "runtime_pct_raw" in b and b["runtime_pct_raw"] != None else 0.0;
         } elif sortColumn == "call_count" {
             valA = a["call_count"] if "call_count" in a else 0;
             valB = b["call_count"] if "call_count" in b else 0;
@@ -114,9 +133,11 @@ def:pub OperatorResultsTable(props: any) -> Any {
         ["w-12", "w-12", "w-12"]
     ];
     skeletonNodes = [];
-    for i in range(3) {
+    row_indices = _index_list(3);
+    col_indices = _index_list(10);
+    for i in row_indices {
         cells = [];
-        for j in range(10) {
+        for j in col_indices {
             bc = " border-l border-[var(--border)] pl-4" if j == 1 or j == 4 or j == 8 else "";
             cells.push(<td key={j} className={"py-3 px-4" + bc}><div className={"skeleton skeleton-line " + skeleton_widths[j][i]}></div></td>);
         }
@@ -158,6 +179,14 @@ def:pub OperatorResultsTable(props: any) -> Any {
 
         r_runtime_pct = r["runtime_pct"] if "runtime_pct" in r else "--";
         r_call_count = r["call_count"] if "call_count" in r else "--";
+        r_timing_source = str(r["timing_source"]) if "timing_source" in r and r["timing_source"] else "";
+        r_metric_arm = str(r["metric_arm"]) if "metric_arm" in r and r["metric_arm"] else "";
+        source_label = "";
+        if r_timing_source == "trace_weighted" {
+            source_label = "trace-weighted" + (f" · {r_metric_arm}" if r_metric_arm else "");
+        } elif r_timing_source {
+            source_label = r_timing_source.replace("_", " ");
+        }
 
         llm_cell_tokens = "--";
         llm_cell_cost = "--";
@@ -178,7 +207,10 @@ def:pub OperatorResultsTable(props: any) -> Any {
             >
                 <td className="py-2.5 px-4 font-mono text-xs text-zinc-200" title={r_name}>{r_short}</td>
                 
-                <td className="py-2.5 px-4 font-mono text-xs text-zinc-400 border-l border-[var(--border)] pl-4 transition-colors">{r_baseline}</td>
+                <td className="py-2.5 px-4 font-mono text-xs text-zinc-400 border-l border-[var(--border)] pl-4 transition-colors">
+                    <div>{r_baseline}</div>
+                    {<div className="text-[10px] text-emerald-300/70 mt-0.5">{source_label}</div> if source_label else <span/>}
+                </td>
                 <td className="py-2.5 px-4 font-mono text-xs text-zinc-400">{r_runtime_pct}</td>
                 <td className="py-2.5 px-4 font-mono text-xs text-zinc-500 pr-4">{r_call_count}</td>
                 
@@ -218,6 +250,7 @@ def:pub OperatorResultsTable(props: any) -> Any {
             </tr>
         );
     }
+    hasUnfilteredRows = list_len(to_list(operatorRows)) > 0;
 
     return
         <div className="rounded-md border border-[var(--border)] bg-[var(--surface-0)] overflow-hidden">
@@ -225,6 +258,16 @@ def:pub OperatorResultsTable(props: any) -> Any {
                 <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-200">
                     Operator Results
                 </h3>
+                <label className="flex items-center gap-2 text-[11px] text-zinc-400 select-none">
+                    <input
+                        type="checkbox"
+                        className="sr-only peer"
+                        checked={showRuntimeMajorOnly}
+                        onChange={lambda e: any -> None { setShowRuntimeMajorOnly(e.target.checked); }}
+                    />
+                    <span className="relative h-5 w-9 rounded-full bg-zinc-800 border border-zinc-700 transition-colors peer-checked:bg-[var(--accent-orange)]/80 peer-checked:border-[var(--accent-orange)] after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-zinc-300 after:transition-transform peer-checked:after:translate-x-4"></span>
+                    <span>{"Show >=1% runtime only"}</span>
+                </label>
             </div>
             <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -234,20 +277,20 @@ def:pub OperatorResultsTable(props: any) -> Any {
                                 <div className="flex items-center">Operator {getSortIcon("name")}</div>
                             </th>
                             
-                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="PyTorch baseline execution time" onClick={lambda -> None { handleSort("baseline"); }}>
+                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Trace-weighted PyTorch baseline time per call when available" onClick={lambda -> None { handleSort("baseline"); }}>
                                 <div className="flex items-center">PyTorch Time {getSortIcon("baseline")}</div>
                             </th>
-                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Percentage of total PyTorch execution time" onClick={lambda -> None { handleSort("runtime_pct"); }}>
+                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Percentage of total trace-weighted PyTorch execution time" onClick={lambda -> None { handleSort("runtime_pct"); }}>
                                 <div className="flex items-center">% Run Time {getSortIcon("runtime_pct")}</div>
                             </th>
                             <th className="py-2.5 px-4 font-normal pr-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Number of calls in model" onClick={lambda -> None { handleSort("call_count"); }}>
                                 <div className="flex items-center">Calls {getSortIcon("call_count")}</div>
                             </th>
 
-                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Execution time of the best generated kernel" onClick={lambda -> None { handleSort("best"); }}>
+                            <th className="py-2.5 px-4 font-normal border-l border-[var(--border)] pl-4 cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Trace-weighted selected kernel time per call when available" onClick={lambda -> None { handleSort("best"); }}>
                                 <div className="flex items-center">Best Kernel {getSortIcon("best")}</div>
                             </th>
-                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Speedup ratio over PyTorch baseline" onClick={lambda -> None { handleSort("ratio"); }}>
+                            <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Trace-weighted speedup over PyTorch baseline when available" onClick={lambda -> None { handleSort("ratio"); }}>
                                 <div className="flex items-center">Speedup {getSortIcon("ratio")}</div>
                             </th>
                             <th className="py-2.5 px-4 font-normal cursor-pointer hover:bg-zinc-800/50 transition-colors group" title="Current progress of operator generation" onClick={lambda -> None { handleSort("status"); }}>
@@ -272,8 +315,11 @@ def:pub OperatorResultsTable(props: any) -> Any {
                     Profiling in progress...
                 </div> if list_len(operatorRowsNodes) == 0 and not loading and profiling else <span></span>}
                 {<div className="p-8 text-center text-xs text-zinc-500 font-mono">
+                    No operators at or above 1% runtime. Disable the filter to show all profiled operators.
+                </div> if list_len(operatorRowsNodes) == 0 and not loading and not profiling and showRuntimeMajorOnly and hasUnfilteredRows else <span></span>}
+                {<div className="p-8 text-center text-xs text-zinc-500 font-mono">
                     No operators discovered yet. Profile the model to find operators.
-                </div> if list_len(operatorRowsNodes) == 0 and not loading and not profiling else <span></span>}
+                </div> if list_len(operatorRowsNodes) == 0 and not loading and not profiling and not (showRuntimeMajorOnly and hasUnfilteredRows) else <span></span>}
             </div>
         </div>;
 }

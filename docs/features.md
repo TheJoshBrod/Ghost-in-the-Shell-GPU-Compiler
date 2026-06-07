@@ -52,11 +52,11 @@ The profiling system targets `torch.nn.functional` operators by default:
 | Linear / Attention | `linear`, `scaled_dot_product_attention` |
 | Normalization | `layer_norm`, `batch_norm` |
 | Activation | `relu`, `gelu`, `softmax` |
-| Other | `embedding`, `dropout`, `pad` |
+| Other | `embedding`, `pad` |
 
-Shape ops, tensor creation ops, and random ops are skipped by default but can be enabled via config.
+Dropout variants, shape ops, tensor creation ops, and random ops are skipped by default but can be enabled via config.
 
 ## Portable project formats
 
 - **`.anvil`**: complete project snapshot (profiling data, kernels, MCTS trees) that can be moved to another machine and resumed inside KernelForge.
-- **`.cast`**: self-contained inference package bundling model weights and optimized kernels. Loadable with only `torch` installed; no KernelForge required at inference time.
+- **`.cast`**: inference package bundling model weights and optimized kernels. Loadable with the KernelForge runtime helper and `torch`.

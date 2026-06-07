@@ -309,10 +309,12 @@ def test_fallback_no_best_json_no_usage_db(tmp_path, monkeypatch):
     assert rc == 0
 
     tok_rows = _read_csv(out / "token_usage.csv")
-    # One per-op zero row + TOTAL row.
-    assert len(tok_rows) == 2
-    assert int(tok_rows[0]["input_tokens"]) == 0
-    assert int(tok_rows[0]["total_tokens"]) == 0
+    # One per-op zero row plus phase totals and TOTAL row.
+    by_op_tok = {r["operator"]: r for r in tok_rows}
+    assert set(by_op_tok) == {"sigmoid", "TOTAL_GENERATOR", "TOTAL_OPTIMIZER", "TOTAL"}
+    assert int(by_op_tok["sigmoid"]["input_tokens"]) == 0
+    assert int(by_op_tok["sigmoid"]["total_tokens"]) == 0
+    assert int(by_op_tok["TOTAL"]["total_tokens"]) == 0
 
     best_rows = _read_csv(out / "best_performance.csv")
     assert len(best_rows) == 1

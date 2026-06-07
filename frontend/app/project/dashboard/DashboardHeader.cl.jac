@@ -68,8 +68,8 @@ def:pub DashboardHeader(props: any) -> Any {
                         className="bg-zinc-900 border border-zinc-700 rounded-md px-3 py-2 text-xs text-zinc-300 shadow-xl max-w-[260px] leading-relaxed"
                     >
                         <div className="font-semibold text-zinc-100 mb-1">Model Speedup Ratio</div>
-                        <div className="text-zinc-400 mb-2">Total op time with PyTorch ÷ estimated op time with forged kernels.</div>
-                        <div className="font-mono text-[10px] text-zinc-400 bg-zinc-800 rounded px-2 py-1">total_pytorch_ms / (total_pytorch_ms − savings_ms)</div>
+                        <div className="text-zinc-400 mb-2">Trace-weighted total op time with PyTorch ÷ trace-weighted mixed forged time when replay data is available.</div>
+                        <div className="font-mono text-[10px] text-zinc-400 bg-zinc-800 rounded px-2 py-1">trace_weighted_pytorch_ms / (trace_weighted_pytorch_ms - savings_ms)</div>
                         <div className="text-zinc-500 mt-2 text-[10px]">Only operators where the forged kernel outperforms PyTorch contribute to savings. All profiled ops are included in the denominator.</div>
                     </div>
                     if speedupTooltipPos

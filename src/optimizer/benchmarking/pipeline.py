@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,10 +10,22 @@ from .assets import prepare_uploaded_assets
 from .paths import project_dir_for_name, repo_root
 from .state import update_job_state
 
+_PROFILE_MAX_ALL_VALUES = {"0", "all", "none", "unlimited"}
+
 
 def _run(cmd: list[str], cwd: Path) -> int:
     print(f"[benchmarking.pipeline] Running: {' '.join(cmd)}")
     return subprocess.run(cmd, cwd=str(cwd)).returncode
+
+
+def _benchmark_max_entries_args_from_env() -> list[str]:
+    capture_mode = os.environ.get("KFORGE_PROFILE_CAPTURE_MODE", "").strip().lower()
+    if capture_mode in {"unique", "unique_cases", "unique-case", "unique_kernel_cases"}:
+        return ["--max-entries", "all"]
+    raw = os.environ.get("KFORGE_PROFILE_MAX_PER_OP", "").strip().lower()
+    if raw in _PROFILE_MAX_ALL_VALUES:
+        return ["--max-entries", "all"]
+    return []
 
 
 def main() -> int:
@@ -102,6 +115,7 @@ def main() -> int:
             "--project",
             args.project,
         ]
+        bench_cmd.extend(_benchmark_max_entries_args_from_env())
         bench_rc = _run(bench_cmd, root)
         if bench_rc != 0:
             update_job_state(

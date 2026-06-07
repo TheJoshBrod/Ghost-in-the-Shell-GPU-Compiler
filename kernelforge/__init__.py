@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
-from kernelforge.run_cast import CastModelRuntime, load_cast
+from importlib import import_module
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kernelforge.run_cast import CastModelRuntime
+
+
+_RUNTIME_EXPORTS = {"CastModelRuntime", "get_runtime_stats", "load_cast", "reset_runtime_stats"}
+
+
+def __getattr__(name: str):
+    if name in _RUNTIME_EXPORTS:
+        module = import_module("kernelforge.run_cast")
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def load(
@@ -13,6 +27,8 @@ def load(
     no_kernels: bool = False,
     opt_level: str = "-O3",
 ) -> CastModelRuntime:
+    from kernelforge.run_cast import load_cast
+
     return load_cast(
         cast_path,
         model_args=model_args,
@@ -22,4 +38,4 @@ def load(
     )
 
 
-__all__ = ["CastModelRuntime", "load", "load_cast"]
+__all__ = ["CastModelRuntime", "get_runtime_stats", "load", "load_cast", "reset_runtime_stats"]

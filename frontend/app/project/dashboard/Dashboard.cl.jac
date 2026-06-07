@@ -1883,7 +1883,12 @@ def:pub Dashboard -> Any {
         is_forged = False;
         ratio_for_sort = 0.0;
         b_val_raw = None;
+        b_total_raw = None;
         metrics_best_raw = None;
+        metrics_best_total_raw = None;
+        timing_source = "";
+        metric_arm = "";
+        unique_cases = None;
         op_queue_summary = find_queue_summary_for_op(queue_summary_by_op, op_name);
         queue_gen_best_raw = (
             to_num(op_queue_summary["best_gen_ms"])
@@ -1901,9 +1906,37 @@ def:pub Dashboard -> Any {
                 b_val = to_num(sd["pytorch"] if "pytorch" in sd else None);
                 b_val_raw = b_val;
                 if b_val != None { baseline_ms = format_tick_ms(b_val); }
+                b_total_raw = to_num(
+                    sd["pytorch_total_ms"]
+                    if "pytorch_total_ms" in sd and sd["pytorch_total_ms"] is not None
+                    else None
+                );
 
                 f_val = to_num(sd["forged"] if "forged" in sd else None);
                 metrics_best_raw = f_val;
+                metrics_best_total_raw = to_num(
+                    sd["forged_total_ms"]
+                    if "forged_total_ms" in sd and sd["forged_total_ms"] is not None
+                    else (
+                        sd["optimized_total_ms"]
+                        if "optimized_total_ms" in sd and sd["optimized_total_ms"] is not None
+                        else None
+                    )
+                );
+                timing_source = (
+                    str(sd["timing_source"])
+                    if "timing_source" in sd and sd["timing_source"]
+                    else ""
+                );
+                metric_arm = (
+                    str(sd["metric_arm"])
+                    if "metric_arm" in sd and sd["metric_arm"]
+                    else ""
+                );
+                if "unique_cases" in sd and sd["unique_cases"] {
+                    raw_unique_cases = sd["unique_cases"];
+                    unique_cases = parseInt(f"{raw_unique_cases}");
+                }
                 break;
             }
         }
@@ -1915,9 +1948,12 @@ def:pub Dashboard -> Any {
                 baseline_ms = format_tick_ms(fb_val);
             }
         }
+        if b_total_raw == None and b_val_raw != None and b_val_raw > 0 {
+            b_total_raw = b_val_raw * op_count_n;
+        }
 
-        if b_val_raw != None and b_val_raw > 0 {
-            totalAllPytorchMs = totalAllPytorchMs + b_val_raw * op_count_n;
+        if b_total_raw != None and b_total_raw > 0 {
+            totalAllPytorchMs = totalAllPytorchMs + b_total_raw;
         }
 
         display_best_raw = metrics_best_raw;
@@ -1927,20 +1963,31 @@ def:pub Dashboard -> Any {
         if display_best_raw != None {
             best_ms = format_tick_ms(display_best_raw);
         }
+        if metrics_best_total_raw == None and metrics_best_raw != None and metrics_best_raw > 0 {
+            metrics_best_total_raw = metrics_best_raw * op_count_n;
+        }
 
-        if b_val_raw != None and b_val_raw > 0 and display_best_raw != None and display_best_raw > 0 {
+        if b_total_raw != None and b_total_raw > 0 and metrics_best_total_raw != None and metrics_best_total_raw > 0 {
+            display_ratio = b_total_raw / metrics_best_total_raw;
+            speedup = f"{display_ratio.toFixed(2)}×";
+            ratio_for_sort = display_ratio;
+        } elif b_val_raw != None and b_val_raw > 0 and display_best_raw != None and display_best_raw > 0 {
             display_ratio = b_val_raw / display_best_raw;
             speedup = f"{display_ratio.toFixed(2)}×";
             ratio_for_sort = display_ratio;
         }
 
         forged_best_raw = metrics_best_raw if metrics_best_raw != None else queue_opt_best_raw;
-        if b_val_raw != None and b_val_raw > 0 and forged_best_raw != None and forged_best_raw > 0 {
-            forged_ratio = b_val_raw / forged_best_raw;
+        forged_best_total_raw = metrics_best_total_raw;
+        if forged_best_total_raw == None and forged_best_raw != None and forged_best_raw > 0 {
+            forged_best_total_raw = forged_best_raw * op_count_n;
+        }
+        if b_total_raw != None and b_total_raw > 0 and forged_best_total_raw != None and forged_best_total_raw > 0 {
+            forged_ratio = b_total_raw / forged_best_total_raw;
             if forged_ratio > 1.001 {
                 is_forged = True;
-                totalPytorchMs = totalPytorchMs + b_val_raw * op_count_n;
-                totalForgedMs = totalForgedMs + forged_best_raw * op_count_n;
+                totalPytorchMs = totalPytorchMs + b_total_raw;
+                totalForgedMs = totalForgedMs + forged_best_total_raw;
             }
         }
 
@@ -1997,6 +2044,11 @@ def:pub Dashboard -> Any {
             "action_disabled": has_row_queue_lock,
             "call_count": op_count_n,
             "baseline_raw": b_val_raw,
+            "baseline_total_raw": b_total_raw,
+            "best_total_raw": metrics_best_total_raw,
+            "timing_source": timing_source,
+            "metric_arm": metric_arm,
+            "unique_cases": unique_cases,
             "display_order": get_stable_op_display_order(op_name)
         });
     }
@@ -2004,6 +2056,11 @@ def:pub Dashboard -> Any {
     grandTotalPytorchTime = 0.0;
     for r in operatorRows {
         c_count = r["call_count"] if "call_count" in r else 1;
+        b_total = r["baseline_total_raw"] if "baseline_total_raw" in r else None;
+        if b_total != None and b_total > 0 {
+            grandTotalPytorchTime += b_total;
+            continue;
+        }
         b_raw = r["baseline_raw"] if "baseline_raw" in r else None;
         if b_raw != None and b_raw > 0 {
             grandTotalPytorchTime += b_raw * c_count;
@@ -2012,10 +2069,21 @@ def:pub Dashboard -> Any {
 
     for r in operatorRows {
         r["runtime_pct"] = "--";
+        r["runtime_pct_raw"] = 0.0;
         c_count = r["call_count"] if "call_count" in r else 1;
+        b_total = r["baseline_total_raw"] if "baseline_total_raw" in r else None;
         b_raw = r["baseline_raw"] if "baseline_raw" in r else None;
-        if b_raw != None and b_raw > 0 and grandTotalPytorchTime > 0 {
+        if b_total != None and b_total > 0 and grandTotalPytorchTime > 0 {
+            pct = (b_total / grandTotalPytorchTime) * 100.0;
+            r["runtime_pct_raw"] = pct;
+            if pct < 0.1 {
+                r["runtime_pct"] = "<0.1%";
+            } else {
+                r["runtime_pct"] = f"{pct.toFixed(2)}%";
+            }
+        } elif b_raw != None and b_raw > 0 and grandTotalPytorchTime > 0 {
             pct = ((b_raw * c_count) / grandTotalPytorchTime) * 100.0;
+            r["runtime_pct_raw"] = pct;
             if pct < 0.1 {
                 r["runtime_pct"] = "<0.1%";
             } else {
